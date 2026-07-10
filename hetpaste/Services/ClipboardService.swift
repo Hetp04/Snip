@@ -1,0 +1,426 @@
+import AppKit
+import Combine
+import UniformTypeIdentifiers
+final class ClipboardService: ObservableObject {
+    private struct AppSource {
+        let name: String
+        let bundleID: String?
+        let icon: NSImage?
+        let observedAt: Date
+    }
+    var onNewItem: ((ClipboardItem) -> Void)?
+    private var timer: Timer?
+    private var lastChangeCount: Int = NSPasteboard.general.changeCount
+    private let pollInterval: TimeInterval = 0.25
+    private let captureQueue = DispatchQueue(label: "com.hetpaste.clipboard-capture", qos: .userInitiated)
+    private static let codeFileExtensions: Set<String> = [
+        "ts","tsx","js","jsx","json","md","txt","yaml","yml","toml","ini","csv",
+        "swift","m","mm","h","hpp","c","cc","cpp","rs","go","java","kt","kts",
+        "py","rb","php","html","htm","css","scss","less","xml"
+    ]
+    private var ignoreNextChangeCount: Int?
+    private var workspaceObserver: NSObjectProtocol?
+    private var recentExternalApps: [AppSource] = []
+    private var ownBundleID: String? {
+        Bundle.main.bundleIdentifier
+    }
+    var captureRawTypes: Bool = false
+    func start() {
+        guard timer == nil else { return }
+        lastChangeCount = NSPasteboard.general.changeCount
+        updateLastExternalApp(from: NSWorkspace.shared.frontmostApplication)
+        installWorkspaceObserver()
+        let timer = Timer(timeInterval: pollInterval, repeats: true) { [weak self] _ in
+            self?.poll()
+        }
+        RunLoop.main.add(timer, forMode: .default)
+        self.timer = timer
+    }
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        if let workspaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)
+            self.workspaceObserver = nil
+        }
+    }
+    func markSelfCopy() {
+        ignoreNextChangeCount = NSPasteboard.general.changeCount
+    }
+    private func poll() {
+        let pasteboard = NSPasteboard.general
+        let current = pasteboard.changeCount
+        guard current != lastChangeCount else { return }
+        lastChangeCount = current
+        if let ignore = ignoreNextChangeCount, ignore == current {
+            ignoreNextChangeCount = nil
+            return
+        }
+        let shouldCaptureRaw = captureRawTypes
+        let sourceApp = detectedSourceApp()
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            let snapshot = PasteboardSnapshot(from: NSPasteboard.general)
+            guard let item = self.captureFromSnapshot(snapshot, sourceApp: sourceApp, captureRaw: shouldCaptureRaw) else { return }
+            DispatchQueue.main.async {
+                self.onNewItem?(item)
+            }
+        }
+    }
+    private struct PasteboardSnapshot {
+        let fileURLs: [URL]
+        let pngData: Data?
+        let tiffData: Data?
+        let rtfdData: Data?
+        let rtfData: Data?
+        let htmlData: Data?
+        let plainString: String?
+        let allTypes: [NSPasteboard.PasteboardType]
+        let allRawData: [NSPasteboard.PasteboardType: Data]
+        init(from pasteboard: NSPasteboard) {
+            fileURLs = (pasteboard.readObjects(forClasses: [NSURL.self],
+                options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+            pngData  = pasteboard.data(forType: .png)
+            tiffData = pasteboard.data(forType: .tiff)
+            rtfdData = pasteboard.data(forType: .rtfd)
+            rtfData  = pasteboard.data(forType: .rtf)
+            htmlData = pasteboard.data(forType: .html)
+            plainString = pasteboard.string(forType: .string)
+            let types = pasteboard.types ?? []
+            allTypes = types
+            var raw: [NSPasteboard.PasteboardType: Data] = [:]
+            for t in types { if let d = pasteboard.data(forType: t) { raw[t] = d } }
+            allRawData = raw
+        }
+    }
+    private func captureFromSnapshot(
+        _ snapshot: PasteboardSnapshot,
+        sourceApp: (name: String, bundleID: String?, icon: NSImage?),
+        captureRaw: Bool
+    ) -> ClipboardItem? {
+        let appName  = sourceApp.name
+        let bundleID = sourceApp.bundleID
+        if let bundleID, let icon = sourceApp.icon {
+            IconCache.shared.prime(bundleID: bundleID, runningIcon: icon)
+        }
+        if let fileURL = snapshot.fileURLs.first {
+            return captureFile(at: fileURL, appName: appName, bundleID: bundleID)
+        }
+        if let imageData = resolvedImageData(png: snapshot.pngData, tiff: snapshot.tiffData) {
+            var item = ClipboardItem(
+                contentType: .image,
+                contentText: nil,
+                sourceAppName: appName,
+                sourceAppBundleID: bundleID,
+                syncStatus: .pending,
+                fileName: "image-\(Int(Date().timeIntervalSince1970)).png",
+                fileSize: Int64(imageData.count),
+                mimeType: "image/png",
+                localData: imageData
+            )
+            if captureRaw { item.rawPasteboardData = nonEmptyDict(snapshot.allRawData) }
+            return item
+        }
+        let plainText = resolvedPlainText(
+            string: snapshot.plainString,
+            rtfdData: snapshot.rtfdData,
+            rtfData: snapshot.rtfData,
+            htmlData: snapshot.htmlData
+        )
+        if var richText = captureRichTextFromSnapshot(snapshot, plainText: plainText, appName: appName, bundleID: bundleID) {
+            richText.detectedLanguage = CodeLanguageDetector.detectLanguage(in: richText.contentText ?? "")
+            if captureRaw { richText.rawPasteboardData = nonEmptyDict(snapshot.allRawData) }
+            return richText
+        }
+        if let text = plainText {
+            let type: ContentType = isURL(text) ? .url : .text
+            var item = ClipboardItem(
+                contentType: type,
+                contentText: text,
+                sourceAppName: appName,
+                sourceAppBundleID: bundleID,
+                syncStatus: .pending
+            )
+            if type == .text {
+                item.detectedLanguage = CodeLanguageDetector.detectLanguage(in: text)
+            }
+            if captureRaw { item.rawPasteboardData = nonEmptyDict(snapshot.allRawData) }
+            return item
+        }
+        return nil
+    }
+    private func nonEmptyDict(_ dict: [NSPasteboard.PasteboardType: Data]) -> [String: Data]? {
+        guard !dict.isEmpty else { return nil }
+        return Dictionary(uniqueKeysWithValues: dict.map { ($0.key.rawValue, $0.value) })
+    }
+    func captureAllRawTypes(from pasteboard: NSPasteboard) -> [String: Data]? {
+        guard let types = pasteboard.types, !types.isEmpty else { return nil }
+        var result: [String: Data] = [:]
+        for pbType in types {
+            if let data = pasteboard.data(forType: pbType) {
+                result[pbType.rawValue] = data
+            }
+        }
+        return result.isEmpty ? nil : result
+    }
+    private func captureFile(at url: URL, appName: String, bundleID: String?) -> ClipboardItem {
+        let ext = url.pathExtension.lowercased()
+        let values = try? url.resourceValues(forKeys: [.contentTypeKey, .fileSizeKey])
+        let utType = values?.contentType ?? UTType(filenameExtension: ext)
+        let mime = utType?.preferredMIMEType ?? "application/octet-stream"
+        let type = classifyFileType(utType: utType, extension: ext, codeExtensions: Self.codeFileExtensions)
+        let data = try? Data(contentsOf: url)
+        let item = ClipboardItem(
+            contentType: type,
+            contentText: url.lastPathComponent,
+            sourceAppName: appName,
+            sourceAppBundleID: bundleID,
+            syncStatus: .pending,
+            fileName: url.lastPathComponent,
+            fileSize: values?.fileSize.map { Int64($0) } ?? data.map { Int64($0.count) },
+            mimeType: mime,
+            originalFileURL: url,
+            localData: data
+        )
+        FileAccessStore.shared.save(url: url, for: item.id)
+        let icon = IconCache.shared.fileIcon(for: url)
+        IconCache.shared.saveFileIcon(icon, forItemId: item.id)
+        return item
+    }
+    private func captureRichTextFromSnapshot(
+        _ snapshot: PasteboardSnapshot,
+        plainText: String?,
+        appName: String,
+        bundleID: String?
+    ) -> ClipboardItem? {
+        let formats: [(data: Data?, type: NSPasteboard.PasteboardType, docType: NSAttributedString.DocumentType)] = [
+            (snapshot.rtfdData, .rtfd, .rtfd),
+            (snapshot.rtfData,  .rtf,  .rtf),
+            (snapshot.htmlData, .html, .html)
+        ]
+        for format in formats {
+            guard let data = format.data else { continue }
+            let attributed = try? NSAttributedString(
+                data: data,
+                options: [.documentType: format.docType],
+                documentAttributes: nil
+            )
+            guard let attributed, isMeaningfullyRichText(attributed, plainText: plainText) else { continue }
+            return ClipboardItem(
+                contentType: .richText,
+                contentText: attributed.string,
+                sourceAppName: appName,
+                sourceAppBundleID: bundleID,
+                syncStatus: .pending,
+                rtfData:  format.type == .rtf  ? data : nil,
+                htmlData: format.type == .html ? data : nil,
+                rtfdData: format.type == .rtfd ? data : nil
+            )
+        }
+        return nil
+    }
+    private func resolvedPlainText(
+        string: String?,
+        rtfdData: Data?,
+        rtfData: Data?,
+        htmlData: Data?
+    ) -> String? {
+        if let text = string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            return text
+        }
+        let pairs: [(Data?, NSAttributedString.DocumentType)] = [
+            (rtfdData, .rtfd), (rtfData, .rtf), (htmlData, .html)
+        ]
+        for (data, docType) in pairs {
+            guard let data else { continue }
+            if let text = (try? NSAttributedString(data: data,
+                options: [.documentType: docType],
+                documentAttributes: nil))?.string
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !text.isEmpty { return text }
+        }
+        return nil
+    }
+    private func resolvedImageData(png: Data?, tiff: Data?) -> Data? {
+        if let png { return png }
+        if let tiff,
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) { return png }
+        return nil
+    }
+    private func isMeaningfullyRichText(_ attributed: NSAttributedString, plainText: String?) -> Bool {
+        guard attributed.length > 0 else { return false }
+        let candidate = attributed.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty else { return false }
+        if let plainText,
+           candidate == plainText.trimmingCharacters(in: .whitespacesAndNewlines),
+           isSinglePlainLookingRun(attributed) {
+            return false
+        }
+        var score = 0
+        var highConfidenceFormatting = false
+        var runCount = 0
+        attributed.enumerateAttributes(in: NSRange(location: 0, length: attributed.length), options: []) { attributes, _, stop in
+            runCount += 1
+            let result = meaningfulFormattingResult(attributes)
+            score += result.score
+            highConfidenceFormatting = highConfidenceFormatting || result.highConfidence
+            if highConfidenceFormatting || score >= 2 {
+                stop.pointee = true
+            }
+        }
+        return highConfidenceFormatting || score >= 2 || (runCount > 1 && score > 0)
+    }
+    private func isSinglePlainLookingRun(_ attributed: NSAttributedString) -> Bool {
+        var runCount = 0
+        var hasFormatting = false
+        attributed.enumerateAttributes(in: NSRange(location: 0, length: attributed.length), options: []) { attributes, _, stop in
+            runCount += 1
+            let result = meaningfulFormattingResult(attributes)
+            if result.highConfidence || result.score > 0 {
+                hasFormatting = true
+            }
+            if runCount > 1 || hasFormatting {
+                stop.pointee = true
+            }
+        }
+        return runCount <= 1 && !hasFormatting
+    }
+    private func meaningfulFormattingResult(_ attributes: [NSAttributedString.Key: Any]) -> (score: Int, highConfidence: Bool) {
+        if attributes[.attachment] != nil {
+            return (3, true)
+        }
+        if attributes[.link] != nil {
+            return (3, true)
+        }
+        if attributes[.underlineStyle] != nil || attributes[.strikethroughStyle] != nil {
+            return (2, true)
+        }
+        if attributes[.baselineOffset] != nil || attributes[.kern] != nil {
+            return (1, false)
+        }
+        if let foreground = attributes[.foregroundColor] as? NSColor,
+           isMeaningfulForegroundColor(foreground) {
+            return (2, true)
+        }
+        if let background = attributes[.backgroundColor] as? NSColor,
+           isMeaningfulBackgroundColor(background) {
+            return (2, true)
+        }
+        if attributes[.shadow] != nil || attributes[.strokeWidth] != nil || attributes[.strokeColor] != nil {
+            return (2, true)
+        }
+        if attributes[.obliqueness] != nil || attributes[.expansion] != nil || attributes[.textEffect] != nil {
+            return (1, false)
+        }
+        if attributes[.writingDirection] != nil ||
+           attributes[.superscript] != nil ||
+           attributes[.verticalGlyphForm] != nil {
+            return (1, false)
+        }
+        if let font = attributes[.font] as? NSFont {
+            if font.isFixedPitch {
+                return (1, false)
+            }
+            let traits = NSFontManager.shared.traits(of: font)
+            if traits.contains(.boldFontMask) || traits.contains(.italicFontMask) {
+                return (2, true)
+            }
+        }
+        if let paragraphStyle = attributes[.paragraphStyle] as? NSParagraphStyle {
+            if paragraphStyle.alignment != .natural && paragraphStyle.alignment != .left ||
+               paragraphStyle.firstLineHeadIndent != 0 ||
+               paragraphStyle.headIndent != 0 ||
+               paragraphStyle.tailIndent != 0 ||
+               paragraphStyle.lineSpacing != 0 ||
+               paragraphStyle.paragraphSpacing != 0 ||
+               paragraphStyle.paragraphSpacingBefore != 0 ||
+               paragraphStyle.minimumLineHeight != 0 ||
+               paragraphStyle.maximumLineHeight != 0 ||
+               paragraphStyle.lineHeightMultiple != 0 ||
+               paragraphStyle.hyphenationFactor != 0 {
+                return (1, false)
+            }
+            if paragraphStyle.baseWritingDirection != .natural {
+                return (1, false)
+            }
+        }
+        return (0, false)
+    }
+    private func isMeaningfulForegroundColor(_ color: NSColor) -> Bool {
+        guard let normalized = color.usingColorSpace(.deviceRGB) else { return true }
+        guard let defaultColor = NSColor.labelColor.usingColorSpace(.deviceRGB) else { return true }
+        return colorDistance(normalized, defaultColor) > 0.08
+    }
+    private func isMeaningfulBackgroundColor(_ color: NSColor) -> Bool {
+        guard let normalized = color.usingColorSpace(.deviceRGB) else { return true }
+        guard normalized.alphaComponent > 0.05 else { return false }
+        guard let white = NSColor.white.usingColorSpace(.deviceRGB) else { return true }
+        let whiteDistance = colorDistance(normalized, white)
+        return whiteDistance > 0.08
+    }
+    private func colorDistance(_ lhs: NSColor, _ rhs: NSColor) -> CGFloat {
+        let redDelta = lhs.redComponent - rhs.redComponent
+        let greenDelta = lhs.greenComponent - rhs.greenComponent
+        let blueDelta = lhs.blueComponent - rhs.blueComponent
+        let alphaDelta = lhs.alphaComponent - rhs.alphaComponent
+        return sqrt((redDelta * redDelta) + (greenDelta * greenDelta) + (blueDelta * blueDelta) + (alphaDelta * alphaDelta))
+    }
+    private func classifyFileType(utType: UTType?, extension ext: String, codeExtensions: Set<String>) -> ContentType {
+        if utType?.conforms(to: .image) == true {
+            return .image
+        }
+        if (utType?.conforms(to: .movie) == true || utType?.conforms(to: .audiovisualContent) == true),
+           !codeExtensions.contains(ext) {
+            return .video
+        }
+        return .file
+    }
+    private func imageData(from pasteboard: NSPasteboard) -> Data? {
+        resolvedImageData(png: pasteboard.data(forType: .png), tiff: pasteboard.data(forType: .tiff))
+    }
+    private func isURL(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.contains(" "), trimmed.count < 2048 else { return false }
+        guard let url = URL(string: trimmed), let scheme = url.scheme?.lowercased() else { return false }
+        return (scheme == "http" || scheme == "https") && url.host != nil
+    }
+    private func installWorkspaceObserver() {
+        guard workspaceObserver == nil else { return }
+        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            self?.updateLastExternalApp(from: app)
+        }
+    }
+    private func updateLastExternalApp(from app: NSRunningApplication?) {
+        guard let app else { return }
+        let bundleID = app.bundleIdentifier
+        guard !isOwnApp(bundleID: bundleID) else { return }
+        let source = AppSource(
+            name: app.localizedName ?? "Unknown",
+            bundleID: bundleID,
+            icon: app.icon,
+            observedAt: Date()
+        )
+        recentExternalApps.removeAll { $0.bundleID == bundleID }
+        recentExternalApps.insert(source, at: 0)
+        if recentExternalApps.count > 8 {
+            recentExternalApps.removeLast(recentExternalApps.count - 8)
+        }
+    }
+    private func detectedSourceApp() -> (name: String, bundleID: String?, icon: NSImage?) {
+        if let recent = recentExternalApps.first {
+            return (recent.name, recent.bundleID, recent.icon)
+        }
+        return ("Unknown", nil, nil)
+    }
+    private func isOwnApp(bundleID: String?) -> Bool {
+        guard let bundleID else { return false }
+        if bundleID == ownBundleID { return true }
+        return bundleID.localizedCaseInsensitiveContains("hetpaste")
+    }
+}

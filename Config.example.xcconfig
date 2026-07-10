@@ -1,0 +1,17 @@
+// Config.example.xcconfig
+// hetpaste — Supabase configuration template
+//
+// 1. Copy this file to `Config.xcconfig` (which is gitignored).
+// 2. Fill in your real anon key.
+// 3. In Xcode: Project > Info > Configurations, set BOTH Debug and Release
+//    "Based on Configuration File" to `Config` for the hetpaste target.
+//
+// NOTE on the URL: `//` starts a comment in xcconfig, so the scheme's double
+// slash is split with an empty `$()` expansion. Leave it exactly as written.
+
+SUPABASE_URL = https:/$()/YOUR-PROJECT-ref.supabase.co
+SUPABASE_ANON_KEY = your-anon-key-here
+
+// Inject the values into the generated Info.plist (read by AppConstants).
+INFOPLIST_KEY_SUPABASE_URL = $(SUPABASE_URL)
+INFOPLIST_KEY_SUPABASE_ANON_KEY = $(SUPABASE_ANON_KEY)

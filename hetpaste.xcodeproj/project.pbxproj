@@ -6,13 +6,32 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		3392DA182FD1062D00F66EDF /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = 3392DA172FD1062D00F66EDF /* Supabase */; };
+		3392DA1C2FD1088600F66EDF /* Config.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 3392DA1B2FD1088600F66EDF /* Config.xcconfig */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
+		3392DA1B2FD1088600F66EDF /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = "<group>"; };
 		33AECC002FD0CA50007AA64D /* hetpaste.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = hetpaste.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		3392DA1A2FD1076000F66EDF /* Exceptions for "hetpaste" folder in "hetpaste" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 33AECBFF2FD0CA50007AA64D /* hetpaste */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		33AECC022FD0CA50007AA64D /* hetpaste */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				3392DA1A2FD1076000F66EDF /* Exceptions for "hetpaste" folder in "hetpaste" target */,
+			);
 			path = hetpaste;
 			sourceTree = "<group>";
 		};
@@ -23,17 +42,27 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3392DA182FD1062D00F66EDF /* Supabase in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		3392DA162FD1062D00F66EDF /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		33AECBF72FD0CA50007AA64D = {
 			isa = PBXGroup;
 			children = (
 				33AECC022FD0CA50007AA64D /* hetpaste */,
+				3392DA162FD1062D00F66EDF /* Frameworks */,
 				33AECC012FD0CA50007AA64D /* Products */,
+				3392DA1B2FD1088600F66EDF /* Config.xcconfig */,
 			);
 			sourceTree = "<group>";
 		};
@@ -65,6 +94,7 @@
 			);
 			name = hetpaste;
 			packageProductDependencies = (
+				3392DA172FD1062D00F66EDF /* Supabase */,
 			);
 			productName = hetpaste;
 			productReference = 33AECC002FD0CA50007AA64D /* hetpaste.app */;
@@ -94,6 +124,9 @@
 			);
 			mainGroup = 33AECBF72FD0CA50007AA64D;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				33AECC382FD0CAEA007AA64D /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 33AECC012FD0CA50007AA64D /* Products */;
 			projectDirPath = "";
@@ -109,6 +142,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3392DA1C2FD1088600F66EDF /* Config.xcconfig in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -247,18 +281,21 @@
 		};
 		33AECC0C2FD0CA52007AA64D /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 3392DA1B2FD1088600F66EDF /* Config.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = hetpaste/hetpaste.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = K3P52MFF3S;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = hetpaste/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -279,18 +316,21 @@
 		};
 		33AECC0D2FD0CA52007AA64D /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 3392DA1B2FD1088600F66EDF /* Config.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = hetpaste/hetpaste.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = K3P52MFF3S;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = hetpaste/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -331,6 +371,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		33AECC382FD0CAEA007AA64D /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase-community/supabase-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.5.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		3392DA172FD1062D00F66EDF /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 33AECC382FD0CAEA007AA64D /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 33AECBF82FD0CA50007AA64D /* Project object */;
 }
