@@ -4,6 +4,7 @@ enum NavDestination: Equatable {
     case launchpad           
     case history             
     case favorites           
+    case chain
     case filteredByApp(String) 
     case filteredByType(ContentType) 
     case folder(ClipboardFolder)
@@ -171,6 +172,8 @@ struct ContentView: View {
                     }
                 }
             )
+        case .chain:
+            placeholderView(title: "Chains", icon: "link")
         case .filteredByApp(let appName):
             ClipboardFeedView(
                 viewModel: viewModel,
@@ -277,11 +280,21 @@ struct ClipboardFeedView: View {
     @State private var editingFolderID: UUID? = nil
     @State private var editingFolderName: String = ""
     @State private var folderToast: String?
-    let columns: [GridItem] = [
-        GridItem(.flexible(), spacing: 16),
-        GridItem(.flexible(), spacing: 16),
-        GridItem(.flexible(), spacing: 16)
-    ]
+    @State private var isGridView: Bool = true
+    
+    var layoutColumns: [GridItem] {
+        if isGridView {
+            return [
+                GridItem(.flexible(), spacing: 16),
+                GridItem(.flexible(), spacing: 16),
+                GridItem(.flexible(), spacing: 16)
+            ]
+        } else {
+            return [
+                GridItem(.flexible(), spacing: 16)
+            ]
+        }
+    }
     var filteredItems: [ClipboardItem] {
         var result = allItems
         if showFavoritesOnly {
@@ -370,52 +383,64 @@ struct ClipboardFeedView: View {
                         .font(.system(size: 22, weight: .bold))
                         .foregroundColor(Theme.textPrimary)
                     Spacer()
-                    Button(action: { showDatePicker = true }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "calendar")
-                                .font(.system(size: 13))
-                            if selectedDateRange != "All Time" {
-                                Text(selectedDateRange)
-                                    .font(.system(size: 10, weight: .semibold))
+                    HStack(spacing: 8) {
+                        Button(action: { showDatePicker = true }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "calendar")
+                                    .font(.system(size: 13, weight: .semibold))
+                                if selectedDateRange != "All Time" {
+                                    Text(selectedDateRange)
+                                        .font(.system(size: 10, weight: .semibold))
+                                }
                             }
+                            .foregroundColor(selectedDateRange == "All Time" ? Theme.textTertiary : Theme.accent)
+                            .padding(.horizontal, 8)
+                            .frame(minWidth: 32, minHeight: 32)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(Color(hex: "#F6F6F6"))
+                                    .softInnerShadow(RoundedRectangle(cornerRadius: 10), darkShadow: Color(hex: "#A3B1C6").opacity(0.6), lightShadow: Color.white, spread: 0.15, radius: 6)
+                            )
                         }
-                        .foregroundColor(selectedDateRange == "All Time" ? Theme.textTertiary : Theme.accent)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 5)
+                        .buttonStyle(.plain)
+                        .help("Filter by date")
+                        .popover(isPresented: $showDatePicker, arrowEdge: .bottom) {
+                            datePickerPopover
+                        }
+                        
+                        // Slider toggle for List/Grid
+                        HStack(spacing: 0) {
+                            Button(action: { withAnimation { isGridView = false } }) {
+                                Image(systemName: "list.bullet")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(!isGridView ? Theme.accent : Theme.textTertiary)
+                                    .frame(width: 32, height: 26)
+                                    .background(
+                                        !isGridView ? Capsule().fill(Color(hex: "#F6F6F6")).softOuterShadow(darkShadow: Color(hex: "#A3B1C6").opacity(0.4), lightShadow: Color.white, offset: 2, radius: 4) : nil
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .help("List view")
+                            
+                            Button(action: { withAnimation { isGridView = true } }) {
+                                Image(systemName: "square.grid.2x2")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundColor(isGridView ? Theme.accent : Theme.textTertiary)
+                                    .frame(width: 32, height: 26)
+                                    .background(
+                                        isGridView ? Capsule().fill(Color(hex: "#F6F6F6")).softOuterShadow(darkShadow: Color(hex: "#A3B1C6").opacity(0.4), lightShadow: Color.white, offset: 2, radius: 4) : nil
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .help("Grid view")
+                        }
+                        .padding(3)
                         .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(selectedDateRange == "All Time" ? Color.clear : Theme.accent.opacity(0.08))
+                            Capsule()
+                                .fill(Color(hex: "#F6F6F6"))
+                                .softInnerShadow(Capsule(), darkShadow: Color(hex: "#A3B1C6").opacity(0.6), lightShadow: Color.white, spread: 0.15, radius: 6)
                         )
                     }
-                    .buttonStyle(.plain)
-                    .help("Filter by date")
-                    .popover(isPresented: $showDatePicker, arrowEdge: .bottom) {
-                        datePickerPopover
-                    }
-                    HStack(spacing: 0) {
-                        Button(action: {}) {
-                            Image(systemName: "list.bullet")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(Theme.textTertiary)
-                                .frame(width: 28, height: 22)
-                        }
-                        .buttonStyle(.plain)
-                        .help("List view")
-                        Button(action: {}) {
-                            Image(systemName: "square.grid.2x2")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(Theme.accent)
-                                .frame(width: 28, height: 22)
-                                .background(Theme.bg)
-                                .cornerRadius(5)
-                                .shadow(color: Color.black.opacity(0.04), radius: 1, y: 1)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Grid view")
-                    }
-                    .padding(2)
-                    .background(Color(hex: "#EAEAEA").opacity(0.5)) 
-                    .cornerRadius(7)
                 }
                 SearchBarView(text: $searchQuery)
                 if let selectedID = selectedItemID, let item = allItems.first(where: { $0.id == selectedID }), item.sourceAppName.lowercased() == "finder" {
@@ -525,7 +550,7 @@ struct ClipboardFeedView: View {
                     .foregroundColor(Color.red.opacity(0.82))
                     .padding(.horizontal, 2)
             }
-            LazyVGrid(columns: columns, spacing: 16) {
+            LazyVGrid(columns: layoutColumns, spacing: 16) {
                 ForEach(viewModel.folders) { folder in
                     FolderCardView(
                         folder: folder,
@@ -583,7 +608,7 @@ struct ClipboardFeedView: View {
     private func gridSection(_ title: String, items: [ClipboardItem]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionHeader(title: title)
-            LazyVGrid(columns: columns, spacing: 16) {
+            LazyVGrid(columns: layoutColumns, spacing: 16) {
                 ForEach(items) { item in
                     gridItemRow(item)
                 }
@@ -689,54 +714,51 @@ struct FolderCardView: View {
     @State private var isTargeted: Bool = false
     @FocusState private var isNameFocused: Bool
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                Image(systemName: "folder.fill")
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundColor(Theme.accent)
-                Spacer()
-                Text("\(itemCount)")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(isTargeted ? .white : Theme.textSecondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule()
-                            .fill(isTargeted ? Theme.accent : Color(hex: "#F1F1EF"))
-                    )
+        HStack(spacing: 12) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundColor(Color(hex: "#3A3A3C"))
+            if isEditing {
+                TextField("Folder name", text: $editingName)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(Color(hex: "#1C1C1E"))
+                    .focused($isNameFocused)
+                    .onSubmit(onCommitRename)
+            } else {
+                Text(folder.name)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(Color(hex: "#1C1C1E"))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            VStack(alignment: .leading, spacing: 4) {
-                if isEditing {
-                    TextField("Folder name", text: $editingName)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                        .focused($isNameFocused)
-                        .onSubmit(onCommitRename)
-                } else {
-                    Text(folder.name)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-                Text(itemCount == 1 ? "1 item" : "\(itemCount) items")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Theme.textSecondary)
+            Spacer(minLength: 0)
+            Button {
+                onBeginRename()
+            } label: {
+                Image(systemName: "ellipsis.vertical")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(Color(hex: "#3A3A3C"))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .contextMenu {
+                Button("Rename", action: onBeginRename)
+                Button("Delete Folder", role: .destructive, action: onDelete)
             }
         }
-        .padding(16)
-        .frame(height: 118)
+        .padding(.horizontal, 16)
+        .frame(height: 56)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(isTargeted ? Theme.accent.opacity(0.08) : Theme.card)
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Theme.selection)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(isTargeted ? Theme.accent : Theme.border, lineWidth: isTargeted ? 1.5 : 1)
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(isTargeted ? Theme.accent : Color.clear, lineWidth: isTargeted ? 1.5 : 0)
         )
-        .shadow(color: Color.black.opacity(isTargeted ? 0.08 : 0.02), radius: isTargeted ? 8 : 2, y: 2)
         .contentShape(Rectangle())
         .onTapGesture {
             if !isEditing {
@@ -791,34 +813,21 @@ struct NewFolderCardView: View {
     let onCreate: () -> Void
     var body: some View {
         Button(action: onCreate) {
-            VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
                 Image(systemName: "plus")
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundColor(Theme.accent)
-                    .frame(width: 32, height: 32)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Theme.accent.opacity(0.1))
-                    )
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("New Folder")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                    Text("Create folder")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(Theme.textSecondary)
-                }
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(Color(hex: "#3A3A3C"))
+                Text("New Folder")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(Color(hex: "#1C1C1E"))
+                Spacer(minLength: 0)
             }
-            .padding(16)
-            .frame(height: 118)
+            .padding(.horizontal, 16)
+            .frame(height: 56)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color(hex: "#F7F7F5"))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Theme.border, style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(Theme.selection)
             )
         }
         .buttonStyle(.plain)

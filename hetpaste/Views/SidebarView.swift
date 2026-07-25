@@ -7,6 +7,7 @@ struct SidebarView: View {
         ("Apps", "square.grid.2x2", .launchpad),
         ("All History", "clock", .history),
         ("Favorites", "star", .favorites),
+        ("Chain", "link", .chain),
         ("Settings", "gearshape", .settings)
     ]
     @State private var isTrashHovered = false
