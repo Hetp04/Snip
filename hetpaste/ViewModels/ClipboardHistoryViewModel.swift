@@ -146,20 +146,29 @@ final class ClipboardHistoryViewModel: ObservableObject {
             // Threshold: < 20 chars means Vision found essentially nothing useful.
             let needsFallback = visionText.trimmingCharacters(in: .whitespaces).count < 20
             var finalText = visionText
+            
+            print("[OCR] Needs fallback: \(needsFallback), Vision chars: \(visionText.count)")
 
-            if needsFallback, await OpenAIOCRService.shared.isConfigured {
-                print("[OCR] Vision result poor (\(visionText.count) chars) — trying OpenAI fallback")
-                do {
-                    let aiText = try await OpenAIOCRService.shared.extractText(fromData: data)
-                    if !aiText.isEmpty {
-                        finalText = aiText
-                        print("[OCR] OpenAI succeeded: \(aiText.count) chars")
+            if needsFallback {
+                let isConfigured = await OpenAIOCRService.shared.isConfigured
+                print("[OCR] OpenAI configured: \(isConfigured)")
+                
+                if isConfigured {
+                    print("[OCR] Vision result poor (\(visionText.count) chars) — trying OpenAI fallback")
+                    do {
+                        let aiText = try await OpenAIOCRService.shared.extractText(fromData: data)
+                        if !aiText.isEmpty {
+                            finalText = aiText
+                            print("[OCR] OpenAI succeeded: \(aiText.count) chars")
+                        } else {
+                            print("[OCR] OpenAI returned empty text")
+                        }
+                    } catch {
+                        print("[OpenAI-OCR] Fallback failed: \(error.localizedDescription)")
                     }
-                } catch {
-                    print("[OpenAI-OCR] Fallback failed: \(error.localizedDescription)")
+                } else {
+                    print("[OCR] Vision poor but OpenAI not configured — no fallback")
                 }
-            } else if needsFallback {
-                print("[OCR] Vision poor but OpenAI not configured — no fallback")
             }
 
             await MainActor.run {
