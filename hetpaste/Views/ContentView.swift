@@ -877,6 +877,13 @@ struct FolderCardView: View {
         .background(
             RoundedRectangle(cornerRadius: 14)
                 .fill(Theme.selection)
+                .softInnerShadow(
+                    RoundedRectangle(cornerRadius: 14),
+                    darkShadow: Color.black.opacity(isTargeted ? 0.25 : 0.15),
+                    lightShadow: Color.white.opacity(0.6),
+                    spread: 0.05,
+                    radius: 3
+                )
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14)
@@ -951,6 +958,13 @@ struct NewFolderCardView: View {
             .background(
                 RoundedRectangle(cornerRadius: 14)
                     .fill(Theme.selection)
+                    .softInnerShadow(
+                        RoundedRectangle(cornerRadius: 14),
+                        darkShadow: Color.black.opacity(0.15),
+                        lightShadow: Color.white.opacity(0.6),
+                        spread: 0.05,
+                        radius: 3
+                    )
             )
         }
         .buttonStyle(.plain)

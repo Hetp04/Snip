@@ -35,10 +35,10 @@ struct SearchBarView: View {
                 .fill(Color(hex: "#F6F6F6"))
                 .softInnerShadow(
                     Capsule(),
-                    darkShadow: Color(hex: "#A3B1C6").opacity(isFocused ? 0.7 : 0.55),
+                    darkShadow: Color.black.opacity(isFocused ? 0.35 : 0.22),
                     lightShadow: Color.white,
-                    spread: 0.15,
-                    radius: 8
+                    spread: 0.05,
+                    radius: isFocused ? 4 : 3
                 )
         )
     }

@@ -159,7 +159,7 @@ struct ChainCardView: View {
                             ZStack {
                                 RoundedRectangle(cornerRadius: 6)
                                     .fill(category.iconBackground)
-                                    .uniformInnerShadow(RoundedRectangle(cornerRadius: 6), color: Color.black.opacity(0.33), radius: 1)
+                                    .softInnerShadow(RoundedRectangle(cornerRadius: 6), darkShadow: Color.black.opacity(0.3), lightShadow: Color.white, spread: 0.05, radius: 1)
                                     .frame(width: 24, height: 24)
                                 Image(systemName: category.iconName)
                                     .font(.system(size: 11, weight: .semibold))
@@ -170,7 +170,7 @@ struct ChainCardView: View {
                             ZStack {
                                 RoundedRectangle(cornerRadius: 6)
                                     .fill(Theme.neoBase)
-                                    .uniformInnerShadow(RoundedRectangle(cornerRadius: 6), color: Color.black.opacity(0.33), radius: 1)
+                                    .softInnerShadow(RoundedRectangle(cornerRadius: 6), darkShadow: Color.black.opacity(0.3), lightShadow: Color.white, spread: 0.05, radius: 1)
                                     .frame(width: 24, height: 24)
                                 Text("+\(contentIcons.count - 4)")
                                     .font(.system(size: 11, weight: .bold))
@@ -184,20 +184,11 @@ struct ChainCardView: View {
         .padding(12)
         .background(Theme.neoBase)
         .clipShape(RoundedRectangle(cornerRadius: 16))
-        .uniformInnerShadow(RoundedRectangle(cornerRadius: 16), color: Color.black.opacity(0.33), radius: isHovered ? 2 : 1)
+        .softInnerShadow(RoundedRectangle(cornerRadius: 16), darkShadow: Color.black.opacity(0.3), lightShadow: Color.white, spread: 0.05, radius: isHovered ? 2 : 1)
         .contentShape(RoundedRectangle(cornerRadius: 16))
         .onHover { isHovered = $0 }
         .onTapGesture(perform: onOpen)
     }
 }
 
-private extension View {
-    func uniformInnerShadow<S: Shape>(_ shape: S, color: Color, radius: CGFloat) -> some View {
-        self.overlay(
-            shape
-                .stroke(color, lineWidth: radius * 2)
-                .blur(radius: radius)
-                .mask(shape)
-        )
-    }
-}
+

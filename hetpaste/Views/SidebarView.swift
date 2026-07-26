@@ -47,6 +47,13 @@ struct SidebarView: View {
                                 ? Color.red.opacity(0.12)
                                 : (destination == .trash ? Theme.selection : (isTrashHovered ? Theme.cardHover : Color.clear))
                         )
+                        .softInnerShadow(
+                            RoundedRectangle(cornerRadius: 7),
+                            darkShadow: Color.black.opacity(destination == .trash ? 0.2 : 0),
+                            lightShadow: Color.white.opacity(destination == .trash ? 0.6 : 0),
+                            spread: 0.05,
+                            radius: 2
+                        )
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 7)
@@ -98,6 +105,13 @@ struct SidebarItem: View {
             .background(
                 RoundedRectangle(cornerRadius: 7)
                     .fill(isSelected ? Theme.selection : (isHovered ? Theme.cardHover : Color.clear))
+                    .softInnerShadow(
+                        RoundedRectangle(cornerRadius: 7),
+                        darkShadow: Color.black.opacity(isSelected ? 0.2 : 0),
+                        lightShadow: Color.white.opacity(isSelected ? 0.6 : 0),
+                        spread: 0.05,
+                        radius: 2
+                    )
             )
             .contentShape(Rectangle())
         }
