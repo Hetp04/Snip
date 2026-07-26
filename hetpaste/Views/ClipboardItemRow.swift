@@ -1210,13 +1210,13 @@ struct OCRTextPopup: View {
             ScrollView {
                 Text(text)
                     .font(.system(size: 14, weight: .regular))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Color(hex: "#2C2C2C"))
                     .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                     .padding(12)
                     .background(
                         RoundedRectangle(cornerRadius: 8)
-                            .fill(Theme.codeBlock)
+                            .fill(Color(hex: "#F7F7F5"))
                     )
             }
             .frame(maxHeight: 400)

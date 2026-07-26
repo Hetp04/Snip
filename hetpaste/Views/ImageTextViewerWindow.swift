@@ -59,6 +59,10 @@ private final class ImageTextViewerVC: NSViewController {
     // VisionKit
     private let analyzer        = ImageAnalyzer()
     private var currentImage: NSImage?
+    /// Shown when VisionKit finds nothing but Gemini AI extracted text
+    private let aiTextScrollView  = NSScrollView()
+    private let aiTextView        = NSTextView()
+    private let aiTextLabel       = NSTextField(labelWithString: "🤖 AI-extracted text (Gemini)")
 
     // MARK: Init
 
@@ -116,6 +120,27 @@ private final class ImageTextViewerVC: NSViewController {
         instructionLabel.isHidden     = true
         root.addSubview(instructionLabel)
 
+        // AI text fallback panel (shown when VisionKit finds nothing)
+        aiTextLabel.font          = .systemFont(ofSize: 10, weight: .semibold)
+        aiTextLabel.textColor     = NSColor.tertiaryLabelColor
+        aiTextLabel.isBordered    = false
+        aiTextLabel.drawsBackground = false
+        aiTextLabel.isHidden      = true
+        root.addSubview(aiTextLabel)
+
+        aiTextView.isEditable     = false
+        aiTextView.isSelectable   = true
+        aiTextView.font           = .systemFont(ofSize: 12)
+        aiTextView.textColor      = NSColor.labelColor
+        aiTextView.backgroundColor = NSColor(white: 0.14, alpha: 1)
+        aiTextView.textContainerInset = CGSize(width: 8, height: 8)
+        aiTextScrollView.documentView  = aiTextView
+        aiTextScrollView.hasVerticalScroller = true
+        aiTextScrollView.drawsBackground = true
+        aiTextScrollView.backgroundColor = NSColor(white: 0.14, alpha: 1)
+        aiTextScrollView.isHidden = true
+        root.addSubview(aiTextScrollView)
+
         self.view = root
     }
 
@@ -156,11 +181,14 @@ private final class ImageTextViewerVC: NSViewController {
         }
 
         guard ImageAnalyzer.isSupported else {
-            showStatus("Live Text not supported on this Mac")
+            if showAIFallbackIfAvailable() == nil {
+                showStatus("Live Text not supported on this Mac")
+            }
             return
         }
 
         showSpinner(true)
+        print("[Viewer] Running VisionKit ImageAnalyzer")
 
         Task { @MainActor in
             do {
@@ -170,40 +198,67 @@ private final class ImageTextViewerVC: NSViewController {
                 showSpinner(false)
 
                 if analysis.hasResults(for: .text) {
+                    print("[Viewer] VisionKit found text — showing overlay")
                     overlayView.analysis = analysis
                     overlayView.isHidden = false
                     instructionLabel.isHidden = false
                     statusLabel.isHidden = true
                 } else {
-                    showStatus("No text detected in this image")
+                    print("[Viewer] VisionKit found no text — checking Gemini fallback")
+                    if showAIFallbackIfAvailable() == nil {
+                        showStatus("No text detected in this image")
+                    }
                 }
             } catch {
                 showSpinner(false)
-                showStatus("Text recognition failed")
+                print("[Viewer] VisionKit error: \(error)")
+                if showAIFallbackIfAvailable() == nil {
+                    showStatus("Text recognition failed")
+                }
             }
         }
+    }
+
+    /// Shows the Gemini-extracted text panel if ocrText is available.
+    /// Returns non-nil if the fallback was shown.
+    @discardableResult
+    private func showAIFallbackIfAvailable() -> Bool? {
+        guard let text = item.ocrText, !text.isEmpty else { return nil }
+        print("[Viewer] Showing Gemini AI text (\(text.count) chars)")
+        aiTextView.string = text
+        aiTextLabel.isHidden      = false
+        aiTextScrollView.isHidden = false
+        instructionLabel.isHidden = false
+        statusLabel.isHidden      = true
+        overlayView.isHidden      = true
+        return true
     }
 
     // MARK: - Layout
 
     private func applyLayout() {
         let b = view.bounds
+        // Reserve bottom 160pt for the AI text panel when visible
+        let aiPanelHeight: CGFloat = aiTextScrollView.isHidden ? 0 : 160
+        let imageAreaHeight = b.height - aiPanelHeight
 
-        imageView.frame   = b
-        // Overlay must exactly match the imageView frame so VisionKit
-        // correctly maps its internal coordinate system to screen pixels
-        overlayView.frame = b
+        imageView.frame   = CGRect(x: 0, y: aiPanelHeight, width: b.width, height: imageAreaHeight)
+        overlayView.frame = imageView.frame
         overlayView.trackingImageView = imageView
+
+        // AI text panel at the bottom
+        aiTextLabel.frame      = CGRect(x: 12, y: aiPanelHeight - 18, width: b.width - 24, height: 16)
+        aiTextScrollView.frame = CGRect(x: 0, y: 0, width: b.width, height: aiPanelHeight - 22)
 
         let sz: CGFloat = 32
         spinner.frame = CGRect(
             x: (b.width  - sz) / 2,
-            y: (b.height - sz) / 2,
+            y: aiPanelHeight + (imageAreaHeight - sz) / 2,
             width: sz, height: sz
         )
 
-        statusLabel.frame = CGRect(x: 20, y: b.height / 2 - 20, width: b.width - 40, height: 40)
-        instructionLabel.frame = CGRect(x: 0, y: 10, width: b.width, height: 20)
+        statusLabel.frame      = CGRect(x: 20, y: aiPanelHeight + imageAreaHeight / 2 - 20, width: b.width - 40, height: 40)
+        instructionLabel.frame = CGRect(x: 0, y: aiPanelHeight + 8, width: b.width, height: 20)
     }
 
     // MARK: - Helpers
