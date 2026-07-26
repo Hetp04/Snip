@@ -24,7 +24,6 @@ struct ClipboardItemRow: View {
     @State private var isCopyHovered: Bool = false
     @State private var isStarHovered: Bool = false
     @State private var isExpandHovered: Bool = false
-    @State private var ocrPopoverWindow: NSWindow?
     private var headerIcon: NSImage? {
         if let bid = item.sourceAppBundleID, !bid.isEmpty {
             if let img = IconCache.shared.cachedAppIcon(bundleID: bid) {
@@ -103,26 +102,6 @@ struct ClipboardItemRow: View {
     private func revealFileInFinder() {
         FileAccessStore.shared.revealInFinder(for: item.id, fallback: item.originalFileURL)
     }
-    
-    private func showOCRPopup(text: String) {
-        let popupView = OCRTextPopup(text: text, onClose: {
-            ocrPopoverWindow?.close()
-            ocrPopoverWindow = nil
-        })
-        
-        let hostingController = NSHostingController(rootView: popupView)
-        let window = NSWindow(contentViewController: hostingController)
-        window.styleMask = [.titled, .closable, .fullSizeContentView]
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.isMovableByWindowBackground = true
-        window.level = .floating
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        
-        ocrPopoverWindow = window
-    }
-    
     @ViewBuilder
     private var fileActionsContextMenu: some View {
         if resolvedFileURL != nil {
@@ -376,27 +355,7 @@ struct ClipboardItemRow: View {
                 )
             switch item.contentType {
             case .image:
-                ZStack(alignment: .topTrailing) {
-                    PasteImagePreview(data: item.localData)
-                    
-                    // OCR Icon Badge for images
-                    if item.ocrStatus == .done, let ocrText = item.ocrText, !ocrText.isEmpty {
-                        Button(action: { showOCRPopup(text: ocrText) }) {
-                            Image(systemName: "text.viewfinder")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(.white)
-                                .frame(width: 32, height: 32)
-                                .background(
-                                    Circle()
-                                        .fill(Theme.accent)
-                                        .shadow(color: Color.black.opacity(0.25), radius: 4, y: 2)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .padding(12)
-                        .help("View extracted text")
-                    }
-                }
+                PasteImagePreview(data: item.localData)
             case .video:
                 MiniVideoMockup()
                     .padding(12)
@@ -637,29 +596,11 @@ struct ClipboardItemRow: View {
     @ViewBuilder
     private var contentPreviewSection: some View {
         if item.contentType == .image || item.contentType == .video {
-            ZStack(alignment: .topTrailing) {
+            ZStack {
                 if item.contentType == .video {
                     MiniVideoMockup()
                 } else {
                     MiniImagePreview(data: item.localData, fitImage: stripMode)
-                }
-                
-                // OCR Icon Badge for images
-                if item.contentType == .image, item.ocrStatus == .done, let ocrText = item.ocrText, !ocrText.isEmpty {
-                    Button(action: { showOCRPopup(text: ocrText) }) {
-                        Image(systemName: "text.viewfinder")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 24, height: 24)
-                            .background(
-                                Circle()
-                                    .fill(Theme.accent)
-                                    .shadow(color: Color.black.opacity(0.2), radius: 3, y: 2)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .padding(6)
-                    .help("View extracted text")
                 }
             }
             .frame(maxWidth: .infinity)
@@ -1176,85 +1117,6 @@ struct MiniFileMockup: View {
         )
     }
 }
-
-// MARK: - OCR Text Popup
-struct OCRTextPopup: View {
-    let text: String
-    var onClose: (() -> Void)? = nil
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            // Header
-            HStack {
-                Image(systemName: "text.viewfinder")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(Theme.accent)
-                Text("Extracted Text")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundColor(Theme.textPrimary)
-                Spacer()
-                Button(action: { onClose?() }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 20))
-                        .foregroundColor(Theme.textTertiary)
-                }
-                .buttonStyle(.plain)
-                .help("Close")
-            }
-            .padding(.bottom, 4)
-            
-            Divider()
-                .background(Theme.divider)
-            
-            // Text Content
-            ScrollView {
-                Text(text)
-                    .font(.system(size: 14, weight: .regular))
-                    .foregroundColor(Color(hex: "#2C2C2C"))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color(hex: "#F7F7F5"))
-                    )
-            }
-            .frame(maxHeight: 400)
-            
-            // Footer with Copy Button
-            HStack {
-                Text("\(text.count) characters")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Theme.textTertiary)
-                Spacer()
-                Button(action: {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(text, forType: .string)
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "doc.on.doc")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text("Copy Text")
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Theme.accent)
-                    )
-                }
-                .buttonStyle(.plain)
-                .help("Copy extracted text to clipboard")
-            }
-        }
-        .padding(20)
-        .frame(width: 500)
-        .background(Theme.bg)
-    }
-}
-
 #Preview {
     VStack(spacing: 8) {
         ClipboardItemRow(
