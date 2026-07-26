@@ -24,7 +24,7 @@ struct ClipboardItemRow: View {
     @State private var isCopyHovered: Bool = false
     @State private var isStarHovered: Bool = false
     @State private var isExpandHovered: Bool = false
-    @State private var showOCRPopup: Bool = false
+    @State private var ocrPopoverWindow: NSWindow?
     private var headerIcon: NSImage? {
         if let bid = item.sourceAppBundleID, !bid.isEmpty {
             if let img = IconCache.shared.cachedAppIcon(bundleID: bid) {
@@ -103,6 +103,26 @@ struct ClipboardItemRow: View {
     private func revealFileInFinder() {
         FileAccessStore.shared.revealInFinder(for: item.id, fallback: item.originalFileURL)
     }
+    
+    private func showOCRPopup(text: String) {
+        let popupView = OCRTextPopup(text: text, onClose: {
+            ocrPopoverWindow?.close()
+            ocrPopoverWindow = nil
+        })
+        
+        let hostingController = NSHostingController(rootView: popupView)
+        let window = NSWindow(contentViewController: hostingController)
+        window.styleMask = [.titled, .closable, .fullSizeContentView]
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isMovableByWindowBackground = true
+        window.level = .floating
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        
+        ocrPopoverWindow = window
+    }
+    
     @ViewBuilder
     private var fileActionsContextMenu: some View {
         if resolvedFileURL != nil {
@@ -361,7 +381,7 @@ struct ClipboardItemRow: View {
                     
                     // OCR Icon Badge for images
                     if item.ocrStatus == .done, let ocrText = item.ocrText, !ocrText.isEmpty {
-                        Button(action: { showOCRPopup = true }) {
+                        Button(action: { showOCRPopup(text: ocrText) }) {
                             Image(systemName: "text.viewfinder")
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundColor(.white)
@@ -629,7 +649,7 @@ struct ClipboardItemRow: View {
                 
                 // OCR Icon Badge for images
                 if item.contentType == .image, item.ocrStatus == .done, let ocrText = item.ocrText, !ocrText.isEmpty {
-                    Button(action: { showOCRPopup = true }) {
+                    Button(action: { showOCRPopup(text: ocrText) }) {
                         Image(systemName: "text.viewfinder")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(.white)
@@ -651,9 +671,6 @@ struct ClipboardItemRow: View {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Theme.border, lineWidth: 0.5)
             )
-            .sheet(isPresented: $showOCRPopup) {
-                OCRTextPopup(text: item.ocrText ?? "")
-            }
         } else if item.contentType == .file {
             let name = item.fileName ?? item.contentText ?? "File"
             let rawExt = URL(fileURLWithPath: name).pathExtension
@@ -1166,7 +1183,7 @@ struct MiniFileMockup: View {
 // MARK: - OCR Text Popup
 struct OCRTextPopup: View {
     let text: String
-    @Environment(\.dismiss) private var dismiss
+    var onClose: (() -> Void)? = nil
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1179,7 +1196,7 @@ struct OCRTextPopup: View {
                     .font(.system(size: 18, weight: .bold))
                     .foregroundColor(Theme.textPrimary)
                 Spacer()
-                Button(action: { dismiss() }) {
+                Button(action: { onClose?() }) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 20))
                         .foregroundColor(Theme.textTertiary)
