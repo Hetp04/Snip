@@ -1,3 +1,4 @@
+-- Clipboard items schema with optimizations
 create table if not exists public.clipboard_items (
     id               uuid primary key default gen_random_uuid(),
     type             text not null,
