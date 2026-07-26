@@ -112,4 +112,77 @@ final class ClipboardRepository {
         }
         return "\(item.id.uuidString).\(ext)"
     }
+    
+    // MARK: - Chains
+    
+    func fetchChains() async throws -> [Chain] {
+        let records: [ChainRecord] = try await client
+            .from(AppConstants.chainsTable)
+            .select()
+            .order("created_at", ascending: true)
+            .execute()
+            .value
+        return records.map(Chain.init(record:))
+    }
+    
+    func fetchChainItems(chainID: UUID) async throws -> [ChainItem] {
+        let records: [ChainItemRecord] = try await client
+            .from(AppConstants.chainItemsTable)
+            .select()
+            .eq("chain_id", value: chainID.uuidString)
+            .order("position", ascending: true)
+            .execute()
+            .value
+        return records.map(ChainItem.init(record:))
+    }
+    
+    func createChain(id: UUID, name: String) async throws {
+        try await client
+            .from(AppConstants.chainsTable)
+            .insert(ChainInsertRecord(id: id.uuidString, name: name))
+            .execute()
+    }
+    
+    func addChainItems(_ items: [ChainItem], chainID: UUID) async throws {
+        guard !items.isEmpty else { return }
+        let records = items.map {
+            ChainItemInsertRecord(
+                id: $0.id.uuidString,
+                chain_id: chainID.uuidString,
+                snippet_id: $0.snippetID.uuidString,
+                position: $0.position
+            )
+        }
+        try await client
+            .from(AppConstants.chainItemsTable)
+            .insert(records)
+            .execute()
+    }
+    
+    func renameChain(id: UUID, name: String) async throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let updatedAt = formatter.string(from: Date())
+        try await client
+            .from(AppConstants.chainsTable)
+            .update(ChainNameUpdate(name: name, updated_at: updatedAt))
+            .eq("id", value: id.uuidString)
+            .execute()
+    }
+    
+    func deleteChainItems(chainID: UUID) async throws {
+        try await client
+            .from(AppConstants.chainItemsTable)
+            .delete()
+            .eq("chain_id", value: chainID.uuidString)
+            .execute()
+    }
+    
+    func deleteChain(id: UUID) async throws {
+        try await client
+            .from(AppConstants.chainsTable)
+            .delete()
+            .eq("id", value: id.uuidString)
+            .execute()
+    }
 }

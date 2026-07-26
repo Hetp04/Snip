@@ -158,10 +158,10 @@ extension NSImage {
     }
 }
 enum Theme {
-    static let bg = Color.white
-    static let sidebar = Color(hex: "#F7F7F5")
+    static let bg = Color(hex: "#FAF9F8")
+    static let sidebar = Color(hex: "#FAF9F8")
     static let card = Color.white
-    static let cardHover = Color(hex: "#F7F7F5")
+    static let cardHover = Color(hex: "#FAF9F8")
     static let selection = Color(hex: "#EBEBEA")
     static let codeBlock = Color(hex: "#1E1E1E")
     static let codeBlockBorder = Color(hex: "#2D2D2D")
@@ -176,6 +176,40 @@ enum Theme {
     static let starActive = Color(hex: "#DFAB01")
     static let syncGreen = Color(hex: "#0F7B6C")
     static let searchBg = Color(hex: "#F1F1EF")
+    
+    // Neomorphic Theme Tokens
+    static let neoBase = Color(hex: "#FEFEFD") // Light off-white base
+    static let neoContent = Color(hex: "#FEFEFD") // Light off-white content
+    
+    static func appHeaderGradient(for appName: String, fallbackColor: Color) -> (Color, Color) {
+        let fadeTo = Color.white
+        switch appName.lowercased() {
+        case "google chrome", "chrome":
+            return (Color(hex: "#FDEFE5"), fadeTo)
+        case "slack":
+            return (Color(hex: "#F4E8F9"), fadeTo)
+        case "figma":
+            return (Color(hex: "#FFECE7"), fadeTo)
+        case "terminal", "iterm", "iterm2":
+            return (Color(hex: "#E5E9EC"), fadeTo)
+        case "safari":
+            return (Color(hex: "#E8F3FD"), fadeTo)
+        case "xcode":
+            return (Color(hex: "#EAF2FD"), fadeTo)
+        case "tableplus":
+            return (Color(hex: "#FFF2E2"), fadeTo)
+        case "code", "vs code", "visual studio code":
+            return (Color(hex: "#E8F3FD"), fadeTo)
+        case "notes":
+            return (Color(hex: "#FFF7E0"), fadeTo)
+        case "finder":
+            return (Color(hex: "#EAF2FD"), fadeTo)
+        case "messages":
+            return (Color(hex: "#E9F9EE"), fadeTo)
+        default:
+            return (fallbackColor.opacity(0.12), fadeTo)
+        }
+    }
 }
 enum AppVisual {
     private static let iconCache = NSCache<NSString, NSImage>()
@@ -243,5 +277,35 @@ extension Date {
             formatter.dateFormat = "MMM d, yyyy 'at' h:mm a"
         }
         return formatter.string(from: self)
+    }
+}
+
+extension View {
+    /// Simulates CSS inset box-shadow in SwiftUI
+    /// Dark shadow is positioned top-left, Light shadow is positioned bottom-right
+    func innerShadow(
+        darkColor: Color = Color(hex: "#A3B1C6").opacity(0.5),
+        lightColor: Color = Color.white.opacity(0.9),
+        radius: CGFloat,
+        offset: CGFloat,
+        cornerRadius: CGFloat
+    ) -> some View {
+        self.overlay(
+            ZStack {
+                // Dark top-left inset shadow: pushed down-right, revealing top-left edge
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .stroke(darkColor, lineWidth: offset * 2)
+                    .blur(radius: radius)
+                    .offset(x: offset, y: offset)
+                    .mask(RoundedRectangle(cornerRadius: cornerRadius))
+                
+                // Light bottom-right inset shadow: pushed up-left, revealing bottom-right edge
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .stroke(lightColor, lineWidth: offset * 2)
+                    .blur(radius: radius)
+                    .offset(x: -offset, y: -offset)
+                    .mask(RoundedRectangle(cornerRadius: cornerRadius))
+            }
+        )
     }
 }

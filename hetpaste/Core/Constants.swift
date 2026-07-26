@@ -30,6 +30,8 @@ enum AppConstants {
     }
     static let clipboardTable = "clipboard_items"
     static let foldersTable = "folders"
+    static let chainsTable = "chains"
+    static let chainItemsTable = "chain_items"
     private static func infoValue(for key: String) -> String? {
         guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else {
             return nil

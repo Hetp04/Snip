@@ -33,27 +33,12 @@ struct ClipboardItemRow: View {
     }
     @ViewBuilder
     private var appBadge: some View {
-        if let icon = headerIcon {
-            Image(nsImage: icon)
-                .resizable()
-                .renderingMode(.original)
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 20, height: 20)
-                .cornerRadius(4)
-        } else {
-            fallbackBadge
-        }
-    }
-    private var fallbackBadge: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 5)
-                .fill(appIconColor)
-                .frame(width: 20, height: 20)
-            Image(systemName: appIconName)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.white)
-        }
+        SoftNeumorphicIconCompact(
+            image: headerIcon,
+            fallbackSystemName: appIconName,
+            fallbackColor: appIconColor,
+            size: 20
+        )
     }
     private var appIconName: String {
         switch item.sourceAppName.lowercased() {
@@ -195,28 +180,13 @@ struct ClipboardItemRow: View {
     }
     @ViewBuilder
     private var largeHeaderAppIcon: some View {
-        ZStack {
-            UnevenRoundedRectangle(
-                topLeadingRadius: 0,
-                bottomLeadingRadius: 0,
-                bottomTrailingRadius: 0,
-                topTrailingRadius: 18
-            )
-            .fill(Color.white.opacity(0.16))
-            if let icon = headerIcon {
-                Image(nsImage: icon)
-                    .resizable()
-                    .renderingMode(.original)
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 38, height: 38)
-            } else {
-                Image(systemName: appIconName)
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.92))
-            }
-        }
-        .frame(width: 54, height: 54)
+        SoftNeumorphicIcon(
+            image: headerIcon,
+            fallbackSystemName: appIconName,
+            fallbackColor: appIconColor,
+            size: 48,
+            elevation: .medium
+        )
     }
     @ViewBuilder
     private var pasteStyleCard: some View {
@@ -273,16 +243,6 @@ struct ClipboardItemRow: View {
                             .buttonStyle(.plain)
                             .onHover { isCopyHovered = $0 }
                         }
-                        Button(action: {
-                            onExpand()
-                        }) {
-                            Image(systemName: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                                .font(.system(size: 11))
-                                .foregroundColor(Theme.textSecondary)
-                                .opacity(isExpandHovered ? 1.0 : 0.4)
-                        }
-                        .buttonStyle(.plain)
-                        .onHover { isExpandHovered = $0 }
                     }
                     .padding(.horizontal, 14)
                     .frame(height: 36)
@@ -297,19 +257,22 @@ struct ClipboardItemRow: View {
             }
         }
         .frame(maxWidth: isExpanded ? 800 : .infinity)
-        .frame(height: isExpanded ? 600 : 194)
-        .background(Theme.card)
-        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .frame(height: isExpanded ? 600 : nil)
+        .background(Theme.neoBase)
+        .clipShape(RoundedRectangle(cornerRadius: 24))
+        // Subtle light grey border, or accent border if selected
         .overlay(
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(isSelected ? Theme.accent : Theme.border.opacity(isHovered ? 0.95 : 0.6), lineWidth: isSelected ? 1.5 : 0.75)
+            RoundedRectangle(cornerRadius: 24)
+                .stroke(isSelected ? Theme.accent : Color(hex: "#E5E5E5"), lineWidth: isSelected ? 2.5 : 1)
         )
-        .shadow(
-            color: isSelected ? Theme.accent.opacity(0.12) : Color.black.opacity(isHovered ? 0.08 : 0.045),
-            radius: isSelected ? 10 : (isHovered ? 9 : 5),
-            y: isHovered ? 4 : 2
+        // Neumorphic Soft Outer Shadow using the library
+        .softOuterShadow(
+            darkShadow: Color(hex: "#A3B1C6").opacity(0.35),
+            lightShadow: Color.white,
+            offset: 6,
+            radius: 8
         )
-        .contentShape(RoundedRectangle(cornerRadius: 18))
+        .contentShape(RoundedRectangle(cornerRadius: 24))
         .onTapGesture {
             onPrimaryTap?()
         }
@@ -334,34 +297,51 @@ struct ClipboardItemRow: View {
         }
     }
     private var pasteHeader: some View {
-        ZStack {
-            pasteHeaderColor
-            HStack(alignment: .center, spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(pasteSourceName)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                    Text("\(pasteTypeLabel)  \(item.createdAt.relativeString())")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.78))
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                largeHeaderAppIcon
-                    .allowsHitTesting(false)
-                    .offset(x: 1)
+        let gradients = Theme.appHeaderGradient(for: item.sourceAppName, fallbackColor: pasteHeaderColor)
+        return HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(pasteSourceName)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Text("\(pasteTypeLabel) · \(item.createdAt.relativeString())")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
-            .padding(.leading, 14)
-            .padding(.trailing, 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            
+            largeHeaderAppIcon
+                .allowsHitTesting(false)
         }
-        .frame(height: 54)
-        .clipped()
+        .padding(.leading, 16)
+        .padding(.trailing, 12)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(
+                    LinearGradient(
+                        colors: [gradients.0, gradients.1],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+        )
+        .padding([.horizontal, .top], 10) // inset relative to outer card
     }
     @ViewBuilder
     private var pasteContent: some View {
         ZStack {
-            Color.white
+            Theme.neoContent
+                .softInnerShadow(
+                    RoundedRectangle(cornerRadius: 16),
+                    darkShadow: Color(hex: "#A3B1C6").opacity(0.35),
+                    lightShadow: Color.white,
+                    spread: 0.04,
+                    radius: 4
+                )
             switch item.contentType {
             case .image:
                 PasteImagePreview(data: item.localData)
@@ -377,8 +357,10 @@ struct ClipboardItemRow: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: isExpanded ? nil : 104)
-        .clipped()
+        .frame(height: isExpanded ? nil : 100)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
     }
     @ViewBuilder
     private var pasteTextPreview: some View {
@@ -448,20 +430,20 @@ struct ClipboardItemRow: View {
     private var pasteFooter: some View {
         HStack(spacing: 8) {
             Text(pasteFooterMetadata)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(Theme.textSecondary)
+                .font(.system(size: 11, weight: .regular))
+                .foregroundColor(Theme.textTertiary)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
             syncBadge
-            HStack(spacing: 9) {
+            HStack(spacing: 10) {
                 if isTrashMode {
                     Button(action: { onRestore() }) {
                         HStack(spacing: 4) {
                             Image(systemName: "arrow.uturn.left")
-                                .font(.system(size: 10, weight: .medium))
+                                .font(.system(size: 10, weight: .light))
                             Text("Restore")
-                                .font(.system(size: 10, weight: .medium))
+                                .font(.system(size: 10, weight: .light))
                         }
                         .foregroundColor(Theme.accent)
                     }
@@ -469,55 +451,65 @@ struct ClipboardItemRow: View {
                     .help("Restore to history")
                     Button(action: { onPermanentDelete() }) {
                         Image(systemName: "xmark")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(size: 10, weight: .light))
                             .foregroundColor(.red.opacity(0.7))
                     }
                     .buttonStyle(.plain)
                     .help("Delete permanently")
                 } else {
-                    Button(action: { onCopy() }) {
-                        Image(systemName: "doc.on.doc")
-                            .font(.system(size: 12))
-                            .foregroundColor(Theme.textSecondary)
-                            .opacity(isCopyHovered ? 1.0 : 0.5)
-                    }
-                    .buttonStyle(.plain)
-                    .onHover { hovering in
-                        isCopyHovered = hovering
-                    }
+                    neoIconButton(
+                        systemName: "doc.on.doc",
+                        isHovered: isCopyHovered,
+                        action: { onCopy() }
+                    )
+                    .onHover { isCopyHovered = $0 }
                     .help("Copy")
                 }
-                Button(action: {
-                    onExpand()
-                }) {
-                    Image(systemName: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 12))
-                        .foregroundColor(Theme.textSecondary)
-                        .opacity(isExpandHovered ? 1.0 : 0.5)
-                }
-                .buttonStyle(.plain)
-                .onHover { hovering in
-                    isExpandHovered = hovering
-                }
-                .help(isExpanded ? "Collapse" : "Expand")
                 if !isTrashMode {
-                    Button(action: { onToggleFavorite() }) {
-                        Image(systemName: item.isPinned ? "star.fill" : "star")
-                            .font(.system(size: 12))
-                            .foregroundColor(item.isPinned ? Theme.starActive : Theme.textSecondary)
-                            .opacity(item.isPinned ? 1.0 : (isStarHovered ? 1.0 : 0.5))
-                    }
-                    .buttonStyle(.plain)
-                    .onHover { hovering in
-                        isStarHovered = hovering
-                    }
+                    neoIconButton(
+                        systemName: item.isPinned ? "star.fill" : "star",
+                        isHovered: isStarHovered,
+                        isAccent: item.isPinned,
+                        accentColor: Theme.starActive,
+                        action: { onToggleFavorite() }
+                    )
+                    .onHover { isStarHovered = $0 }
                     .help("Favorite")
                 }
             }
         }
-        .padding(.horizontal, 14)
-        .frame(height: 36)
-        .background(Theme.card)
+        .padding(.horizontal, 20)
+        .padding(.bottom, 12)
+        .background(Theme.neoBase)
+    }
+
+    @ViewBuilder
+    private func neoIconButton(
+        systemName: String,
+        isHovered: Bool,
+        isAccent: Bool = false,
+        accentColor: Color = Theme.accent,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Theme.neoBase)
+                    .softInnerShadow(
+                        RoundedRectangle(cornerRadius: 8),
+                        darkShadow: Color(hex: "#A0AED0").opacity(isHovered ? 0.62 : 0.48),
+                        lightShadow: Color.white.opacity(0.92),
+                        spread: 0.16,
+                        radius: isHovered ? 4.0 : 3.8
+                    )
+                Image(systemName: systemName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(isAccent ? accentColor : (isHovered ? Theme.textPrimary : Theme.textSecondary))
+            }
+            .frame(width: 30, height: 30)
+        }
+        .buttonStyle(.plain)
+        .animation(.easeInOut(duration: 0.15), value: isHovered)
     }
     @ViewBuilder
     private var tappableCardContent: some View {
@@ -741,42 +733,23 @@ struct ClipboardItemRow: View {
                     .buttonStyle(.plain)
                     .help("Delete permanently")
                 } else {
-                    Button(action: { onCopy() }) {
-                        Image(systemName: "doc.on.doc")
-                            .font(.system(size: 11))
-                            .foregroundColor(Theme.textSecondary)
-                            .opacity(isCopyHovered ? 1.0 : 0.4)
-                    }
-                    .buttonStyle(.plain)
-                    .onHover { hovering in
-                        isCopyHovered = hovering
-                    }
+                    neoIconButton(
+                        systemName: "doc.on.doc",
+                        isHovered: isCopyHovered,
+                        action: { onCopy() }
+                    )
+                    .onHover { isCopyHovered = $0 }
                     .help("Copy")
                 }
-                Button(action: {
-                    onExpand()
-                }) {
-                    Image(systemName: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textSecondary)
-                        .opacity(isExpandHovered ? 1.0 : 0.4)
-                }
-                .buttonStyle(.plain)
-                .onHover { hovering in
-                    isExpandHovered = hovering
-                }
-                .help(isExpanded ? "Collapse" : "Expand")
                 if !isTrashMode {
-                    Button(action: { onToggleFavorite() }) {
-                        Image(systemName: item.isPinned ? "star.fill" : "star")
-                            .font(.system(size: 11))
-                            .foregroundColor(item.isPinned ? Theme.starActive : Theme.textSecondary)
-                            .opacity(item.isPinned ? 1.0 : (isStarHovered ? 1.0 : 0.4))
-                    }
-                    .buttonStyle(.plain)
-                    .onHover { hovering in
-                        isStarHovered = hovering
-                    }
+                    neoIconButton(
+                        systemName: item.isPinned ? "star.fill" : "star",
+                        isHovered: isStarHovered,
+                        isAccent: item.isPinned,
+                        accentColor: Theme.starActive,
+                        action: { onToggleFavorite() }
+                    )
+                    .onHover { isStarHovered = $0 }
                     .help("Favorite")
                 }
             }

@@ -15,6 +15,8 @@ final class ClipboardHistoryViewModel: ObservableObject {
     var trashedItems: [ClipboardItem] { items.filter { $0.isDeleted } }
     var activeItems: [ClipboardItem] { items.filter { !$0.isDeleted } }
     @Published private(set) var folders: [ClipboardFolder] = []
+    @Published private(set) var chains: [Chain] = []
+    @Published private(set) var chainItems: [UUID: [ChainItem]] = [:]
     @Published private(set) var isLoading: Bool = false
     @Published var loadError: String?
     @Published var focusedItemID: UUID?
@@ -56,6 +58,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
         do {
             async let loadedItems = repository.fetchAll()
             async let loadedFolders = repository.fetchFolders()
+            async let loadedChainsTask: () = loadChains()
             var loaded = try await loadedItems
             for i in 0..<loaded.count {
                 if loaded[i].contentType == .file || loaded[i].contentType == .image || loaded[i].contentType == .video {
@@ -71,10 +74,26 @@ final class ClipboardHistoryViewModel: ObservableObject {
             items = loaded
             let remoteFolders = try await loadedFolders
             folders = mergeFolders(remoteFolders)
+            _ = await loadedChainsTask
         } catch {
             loadError = error.localizedDescription
         }
         isLoading = false
+    }
+    
+    private func loadChains() async {
+        do {
+            let fetchedChains = try await repository.fetchChains()
+            var itemsDict: [UUID: [ChainItem]] = [:]
+            for chain in fetchedChains {
+                let items = try await repository.fetchChainItems(chainID: chain.id)
+                itemsDict[chain.id] = items
+            }
+            self.chains = fetchedChains
+            self.chainItems = itemsDict
+        } catch {
+            print("Failed to load chains: \(error)")
+        }
     }
     private func handleNewItem(_ item: ClipboardItem) {
         if let first = items.first,
@@ -464,6 +483,143 @@ final class ClipboardHistoryViewModel: ObservableObject {
             return "Folder relationship is out of sync. Try reopening the app."
         }
         return fallback
+    }
+    
+    // MARK: - Chain Actions
+    
+    func activeItems(for chain: Chain) -> [ClipboardItem] {
+        let cItems = (chainItems[chain.id] ?? []).sorted { $0.position < $1.position }
+        return cItems.compactMap { ci in activeItems.first(where: { $0.id == ci.snippetID }) }
+    }
+
+    func createChain(name: String, snippetIDs: [UUID]) {
+        let chain = Chain(id: UUID(), name: name, createdAt: Date(), updatedAt: Date())
+        var chainItemsForThisChain: [ChainItem] = []
+        for (index, snippetID) in snippetIDs.enumerated() {
+            chainItemsForThisChain.append(ChainItem(id: UUID(), chainID: chain.id, snippetID: snippetID, position: index))
+        }
+        
+        chains.append(chain)
+        chainItems[chain.id] = chainItemsForThisChain
+        
+        Task {
+            do {
+                try await repository.createChain(id: chain.id, name: name)
+                try await repository.addChainItems(chainItemsForThisChain, chainID: chain.id)
+            } catch {
+                print("Failed to create chain: \(error)")
+                self.chains.removeAll { $0.id == chain.id }
+                self.chainItems.removeValue(forKey: chain.id)
+            }
+        }
+    }
+    
+    func renameChain(_ chain: Chain, name: String) {
+        guard let index = chains.firstIndex(where: { $0.id == chain.id }) else { return }
+        let oldName = chains[index].name
+        chains[index].name = name
+        chains[index].updatedAt = Date()
+        
+        Task {
+            do {
+                try await repository.renameChain(id: chain.id, name: name)
+            } catch {
+                print("Failed to rename chain: \(error)")
+                DispatchQueue.main.async {
+                    self.chains[index].name = oldName
+                }
+            }
+        }
+    }
+    
+    func updateChain(_ chain: Chain, name: String, snippetIDs: [UUID]) {
+        guard let index = chains.firstIndex(where: { $0.id == chain.id }) else { return }
+        
+        let oldName = chains[index].name
+        let oldItems = chainItems[chain.id]
+        
+        chains[index].name = name
+        chains[index].updatedAt = Date()
+        
+        var newChainItems: [ChainItem] = []
+        for (idx, snippetID) in snippetIDs.enumerated() {
+            newChainItems.append(ChainItem(id: UUID(), chainID: chain.id, snippetID: snippetID, position: idx))
+        }
+        
+        chainItems[chain.id] = newChainItems
+        
+        Task {
+            do {
+                if oldName != name {
+                    try await repository.renameChain(id: chain.id, name: name)
+                }
+                try await repository.deleteChainItems(chainID: chain.id)
+                if !newChainItems.isEmpty {
+                    try await repository.addChainItems(newChainItems, chainID: chain.id)
+                }
+            } catch {
+                print("Failed to update chain: \(error)")
+                DispatchQueue.main.async {
+                    self.chains[index].name = oldName
+                    self.chainItems[chain.id] = oldItems
+                }
+            }
+        }
+    }
+    
+    func deleteChain(_ chain: Chain) {
+        guard let index = chains.firstIndex(where: { $0.id == chain.id }) else { return }
+        let removedChain = chains.remove(at: index)
+        let removedItems = chainItems.removeValue(forKey: chain.id)
+        
+        Task {
+            do {
+                try await repository.deleteChain(id: chain.id)
+            } catch {
+                print("Failed to delete chain: \(error)")
+                self.chains.insert(removedChain, at: index)
+                self.chainItems[chain.id] = removedItems
+            }
+        }
+    }
+    
+    func updateChainItems(chain: Chain, snippetIDs: [UUID]) {
+        let oldItems = chainItems[chain.id]
+        
+        var newChainItems: [ChainItem] = []
+        for (index, snippetID) in snippetIDs.enumerated() {
+            newChainItems.append(ChainItem(id: UUID(), chainID: chain.id, snippetID: snippetID, position: index))
+        }
+        
+        chainItems[chain.id] = newChainItems
+        
+        Task {
+            do {
+                try await repository.deleteChainItems(chainID: chain.id)
+                try await repository.addChainItems(newChainItems, chainID: chain.id)
+            } catch {
+                print("Failed to update chain items: \(error)")
+                self.chainItems[chain.id] = oldItems
+            }
+        }
+    }
+    
+    func pasteChain(_ chain: Chain) {
+        guard let items = chainItems[chain.id] else { return }
+        
+        let sortedChainItems = items.sorted { $0.position < $1.position }
+        let clipboardItemsToPaste = sortedChainItems.compactMap { ci in
+            self.items.first(where: { $0.id == ci.snippetID })
+        }
+        
+        guard !clipboardItemsToPaste.isEmpty else { return }
+        
+        psychoCopyManager.clearQueue()
+        psychoCopyManager.activateMultiCopyMode()
+        
+        for item in clipboardItemsToPaste {
+            psychoCopyManager.handleClipboardChange(item)
+        }
     }
 }
 extension ClipboardHistoryViewModel {

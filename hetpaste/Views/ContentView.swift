@@ -19,9 +19,43 @@ struct ContentView: View {
     @State private var toastTimer: Timer? = nil
     @State private var isSidebarVisible: Bool = true
     @State private var expandedItem: ClipboardItem? = nil
+    
+    @State private var isCreatingChain: Bool = false
+    @State private var chainSelectedIDs: [UUID] = []
+    @State private var showChainOverlay: Bool = false
+    @State private var editingChain: Chain? = nil
+    @State private var draftChainName: String = ""
+    @State private var draftChainItems: [ClipboardItem] = []
+
     var body: some View {
         ZStack {
-            HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                if isCreatingChain {
+                    ChainSelectionTopBar(
+                        selectedCount: chainSelectedIDs.count,
+                        onCancel: {
+                            withAnimation {
+                                isCreatingChain = false
+                                chainSelectedIDs.removeAll()
+                                editingChain = nil
+                            }
+                        },
+                        onNext: {
+                            if let chain = editingChain {
+                                draftChainName = chain.name
+                            } else {
+                                draftChainName = ""
+                            }
+                            
+                            draftChainItems = chainSelectedIDs.compactMap { id in viewModel.activeItems.first(where: { $0.id == id }) }
+                            withAnimation { showChainOverlay = true }
+                        }
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    Divider().background(Theme.divider)
+                }
+                
+                HStack(spacing: 0) {
                 if isSidebarVisible {
                     SidebarView(
                         destination: $destination,
@@ -39,8 +73,38 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.2), value: destination)
+                }
             }
-            .blur(radius: expandedItem != nil ? 10 : 0)
+            .blur(radius: expandedItem != nil || showChainOverlay ? 10 : 0)
+            
+            if showChainOverlay {
+                Color.black.opacity(0.3).ignoresSafeArea()
+                    .onTapGesture { showChainOverlay = false }
+                
+                ChainNamingOverlay(
+                    chainName: $draftChainName,
+                    items: $draftChainItems,
+                    isEditing: editingChain != nil,
+                    onCancel: { showChainOverlay = false },
+                    onSave: {
+                        let finalIDs = draftChainItems.map { $0.id }
+                        if let chain = editingChain {
+                            viewModel.updateChain(chain, name: draftChainName, snippetIDs: finalIDs)
+                        } else {
+                            viewModel.createChain(name: draftChainName.isEmpty ? "Untitled Chain" : draftChainName, snippetIDs: finalIDs)
+                        }
+                        showChainOverlay = false
+                        isCreatingChain = false
+                        chainSelectedIDs.removeAll()
+                        destination = .chain
+                    }
+                )
+                .frame(width: 800, height: 600)
+                .background(Theme.bg)
+                .cornerRadius(12)
+                .shadow(radius: 20)
+                .zIndex(100)
+            }
             if let item = expandedItem {
                 Color.black.opacity(0.3)
                     .ignoresSafeArea()
@@ -157,7 +221,9 @@ struct ContentView: View {
                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                         expandedItem = item
                     }
-                }
+                },
+                isChainSelectionMode: isCreatingChain,
+                chainSelectedIDs: $chainSelectedIDs
             )
         case .favorites:
             ClipboardFeedView(
@@ -170,10 +236,30 @@ struct ContentView: View {
                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                         expandedItem = item
                     }
-                }
+                },
+                isChainSelectionMode: isCreatingChain,
+                chainSelectedIDs: $chainSelectedIDs
             )
         case .chain:
-            placeholderView(title: "Chains", icon: "link")
+            ChainView(
+                viewModel: viewModel,
+                onItemCopy: triggerCopyToast,
+                onCreateChain: {
+                    withAnimation {
+                        isCreatingChain = true
+                        destination = .history
+                    }
+                },
+                onEditChain: { chain in
+                    editingChain = chain
+                    chainSelectedIDs = viewModel.activeItems(for: chain).map { $0.id }
+                    
+                    withAnimation {
+                        isCreatingChain = true
+                        destination = .history
+                    }
+                }
+            )
         case .filteredByApp(let appName):
             ClipboardFeedView(
                 viewModel: viewModel,
@@ -186,7 +272,9 @@ struct ContentView: View {
                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                         expandedItem = item
                     }
-                }
+                },
+                isChainSelectionMode: isCreatingChain,
+                chainSelectedIDs: $chainSelectedIDs
             )
         case .filteredByType(let type):
             ClipboardFeedView(
@@ -200,7 +288,9 @@ struct ContentView: View {
                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                         expandedItem = item
                     }
-                }
+                },
+                isChainSelectionMode: isCreatingChain,
+                chainSelectedIDs: $chainSelectedIDs
             )
         case .folder(let folder):
             ClipboardFeedView(
@@ -214,7 +304,9 @@ struct ContentView: View {
                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                         expandedItem = item
                     }
-                }
+                },
+                isChainSelectionMode: isCreatingChain,
+                chainSelectedIDs: $chainSelectedIDs
             )
         case .trash:
             TrashView(
@@ -271,6 +363,9 @@ struct ClipboardFeedView: View {
     var onSelectFolder: ((ClipboardFolder) -> Void)? = nil
     var onBackToHistory: (() -> Void)? = nil
     var onExpandItem: ((ClipboardItem) -> Void)? = nil
+    var isChainSelectionMode: Bool = false
+    var chainSelectedIDs: Binding<[UUID]>? = nil
+    
     private var allItems: [ClipboardItem] { viewModel.activeItems }
     @State private var searchQuery: String = ""
     @State private var selectedDateRange: String = "All Time"
@@ -616,44 +711,72 @@ struct ClipboardFeedView: View {
         }
     }
     private func gridItemRow(_ item: ClipboardItem) -> some View {
-        ClipboardItemRow(
-            item: item,
-            isSelected: selectedItemID == item.id,
-            isMostRecent: item.id == mostRecentID,
-            onToggleFavorite: { viewModel.toggleFavorite(item) },
-            onRetrySync: { viewModel.retrySync(item) },
-            onCopy: {
-                selectedItemID = item.id
-                viewModel.copyToPasteboard(item)
-                onItemCopy(item)
-            },
-            onDelete: {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                    if selectedFolder != nil {
-                        viewModel.removeFromFolder(item)
-                    } else {
-                        viewModel.deleteItem(item)
+        Group {
+            if isChainSelectionMode, let chainBinding = chainSelectedIDs {
+                let isSelectedForChain = chainBinding.wrappedValue.contains(item.id)
+                ClipboardItemRow(
+                    item: item,
+                    isSelected: isSelectedForChain,
+                    isMostRecent: false,
+                    onToggleFavorite: {},
+                    onRetrySync: {},
+                    onCopy: { toggleChainSelection(item.id, binding: chainBinding) },
+                    onDelete: {},
+                    onTrash: {},
+                    onExpand: {},
+                    onPrimaryTap: { toggleChainSelection(item.id, binding: chainBinding) }
+                )
+            } else {
+                ClipboardItemRow(
+                    item: item,
+                    isSelected: selectedItemID == item.id,
+                    isMostRecent: item.id == mostRecentID,
+                    onToggleFavorite: { viewModel.toggleFavorite(item) },
+                    onRetrySync: { viewModel.retrySync(item) },
+                    onCopy: {
+                        selectedItemID = item.id
+                        viewModel.copyToPasteboard(item)
+                        onItemCopy(item)
+                    },
+                    onDelete: {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            if selectedFolder != nil {
+                                viewModel.removeFromFolder(item)
+                            } else {
+                                viewModel.deleteItem(item)
+                            }
+                        }
+                    },
+                    onTrash: { viewModel.moveToTrash(item) },
+                    onExpand: { onExpandItem?(item) },
+                    onPrimaryTap: {
+                        selectedItemID = item.id
+                        selectedItemIDs = [item.id]
+                        viewModel.copyToPasteboard(item)
+                        onItemCopy(item)
                     }
+                )
+                .onDrag {
+                    let ids = selectedItemIDs.contains(item.id) ? Array(selectedItemIDs) : [item.id]
+                    return viewModel.folderDragItemProvider(for: ids)
                 }
-            },
-            onTrash: { viewModel.moveToTrash(item) },
-            onExpand: { onExpandItem?(item) },
-            onPrimaryTap: {
-                selectedItemID = item.id
-                selectedItemIDs = [item.id]
-                viewModel.copyToPasteboard(item)
-                onItemCopy(item)
             }
-        )
-        .onDrag {
-            let ids = selectedItemIDs.contains(item.id) ? Array(selectedItemIDs) : [item.id]
-            return viewModel.folderDragItemProvider(for: ids)
         }
         .onAppear {
             if item.contentType == .image {
                 viewModel.loadLocalDataIfNeeded(for: item)
             }
         }
+    }
+    
+    private func toggleChainSelection(_ id: UUID, binding: Binding<[UUID]>) {
+        var ids = binding.wrappedValue
+        if let idx = ids.firstIndex(of: id) {
+            ids.remove(at: idx)
+        } else {
+            ids.append(id)
+        }
+        binding.wrappedValue = ids
     }
     private func path(for item: ClipboardItem) -> String {
         if let url = item.revealableFileURL {
@@ -844,6 +967,228 @@ struct SectionHeader: View {
             .padding(.leading, 2)
     }
 }
+
+// MARK: - Chain UI Components
+
+struct ChainSelectionTopBar: View {
+    let selectedCount: Int
+    let onCancel: () -> Void
+    let onNext: () -> Void
+    
+    var body: some View {
+        HStack {
+            Button("Cancel", action: onCancel)
+                .buttonStyle(.plain)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(Theme.textSecondary)
+            Spacer()
+            Text("\(selectedCount) selected")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(Theme.textPrimary)
+            Spacer()
+            if selectedCount >= 2 {
+                Button("Next →", action: onNext)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(Theme.accent)
+            } else {
+                Text("Select ≥2")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(Theme.textTertiary)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(Color(hex: "#F6F6F6").shadow(color: .black.opacity(0.05), radius: 3, y: 2))
+    }
+}
+
+struct ChainItemDropDelegate: DropDelegate {
+    let item: ClipboardItem
+    @Binding var items: [ClipboardItem]
+    @Binding var draggedItem: ClipboardItem?
+    
+    func dropEntered(info: DropInfo) {
+        guard let draggedItem = draggedItem,
+              draggedItem.id != item.id,
+              let from = items.firstIndex(where: { $0.id == draggedItem.id }),
+              let to = items.firstIndex(where: { $0.id == item.id }) else { return }
+        
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+            items.swapAt(from, to)
+        }
+    }
+    
+    func performDrop(info: DropInfo) -> Bool {
+        draggedItem = nil
+        return true
+    }
+}
+
+struct ChainNamingOverlay: View {
+    @Binding var chainName: String
+    @Binding var items: [ClipboardItem]
+    let isEditing: Bool
+    let onCancel: () -> Void
+    let onSave: () -> Void
+    
+    @State private var isGalleryMode = false
+    @State private var draggedItem: ClipboardItem?
+    
+    let columns = [
+        GridItem(.adaptive(minimum: 180, maximum: 280), spacing: 16)
+    ]
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button("Cancel", action: onCancel)
+                    .buttonStyle(.plain)
+                    .foregroundColor(Theme.textSecondary)
+                
+                Spacer()
+                Text(isEditing ? "Edit Chain" : "Save Chain").font(.headline)
+                Spacer()
+                Button(isEditing ? "Save Changes" : "Save", action: onSave)
+                    .buttonStyle(.plain)
+                    .foregroundColor(Theme.accent)
+                    .font(.headline)
+            }
+            .padding(16)
+            Divider()
+            
+            VStack(alignment: .leading, spacing: 16) {
+                if isEditing {
+                    Text(chainName)
+                        .font(.system(size: 24, weight: .bold))
+                        .padding(.horizontal, 20)
+                        .padding(.top, 20)
+                } else {
+                    TextField("Chain Name", text: $chainName)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 24, weight: .bold))
+                        .padding(.horizontal, 20)
+                        .padding(.top, 20)
+                }
+                
+                HStack {
+                    Text("Drag to reorder snippets")
+                        .font(.system(size: 12))
+                        .foregroundColor(Theme.textTertiary)
+                    Spacer()
+                    
+                    // View Toggle
+                    HStack(spacing: 0) {
+                        Button(action: { isGalleryMode = false }) {
+                            Image(systemName: "list.bullet")
+                                .font(.system(size: 13, weight: isGalleryMode ? .regular : .semibold))
+                                .foregroundColor(isGalleryMode ? Theme.textSecondary : .white)
+                                .frame(width: 32, height: 26)
+                                .background(isGalleryMode ? Color.clear : Color(hex: "#2C2C2E"))
+                        }
+                        .buttonStyle(.plain)
+                        
+                        Button(action: { isGalleryMode = true }) {
+                            Image(systemName: "square.grid.2x2")
+                                .font(.system(size: 13, weight: isGalleryMode ? .semibold : .regular))
+                                .foregroundColor(isGalleryMode ? .white : Theme.textSecondary)
+                                .frame(width: 32, height: 26)
+                                .background(isGalleryMode ? Color(hex: "#2C2C2E") : Color.clear)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Theme.border, lineWidth: 1)
+                    )
+                }
+                .padding(.horizontal, 20)
+                
+                if !isGalleryMode {
+                    List {
+                        ForEach(items) { item in
+                            HStack {
+                                Image(systemName: "line.3.horizontal")
+                                    .foregroundColor(Theme.textTertiary)
+                                Text(item.previewText ?? "Item")
+                                    .lineLimit(1)
+                                    .font(.system(size: 13))
+                                Spacer()
+                                Button(action: {
+                                    withAnimation {
+                                        items.removeAll { $0.id == item.id }
+                                    }
+                                }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(Theme.textTertiary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.vertical, 8)
+                            .listRowBackground(Color.clear)
+                        }
+                        .onMove { indices, newOffset in
+                            items.move(fromOffsets: indices, toOffset: newOffset)
+                        }
+                    }
+                    .listStyle(.plain)
+                } else {
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 16) {
+                            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                                ZStack(alignment: .topLeading) {
+                                    ClipboardItemRow(item: item, isSelected: false)
+                                        .allowsHitTesting(false) // Disable inner buttons while ordering
+                                        .opacity(draggedItem?.id == item.id ? 0.3 : 1.0)
+                                        .scaleEffect(draggedItem?.id == item.id ? 0.95 : 1.0)
+                                    
+                                    // Transparent overlay to catch drag gestures covering the whole bounds
+                                    Color.clear
+                                        .contentShape(Rectangle())
+                                        .onDrag {
+                                            draggedItem = item
+                                            return NSItemProvider(object: item.id.uuidString as NSString)
+                                        }
+                                        .onDrop(of: [UTType.text], delegate: ChainItemDropDelegate(item: item, items: $items, draggedItem: $draggedItem))
+                                    
+                                    // Sequence Badge
+                                    Text("\(index + 1)")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundColor(.white)
+                                        .frame(width: 24, height: 24)
+                                        .background(Theme.accent)
+                                        .clipShape(Circle())
+                                        .overlay(Circle().stroke(Color.white, lineWidth: 2))
+                                        .offset(x: -8, y: -8)
+                                        .zIndex(1)
+                                        
+                                    // Remove Button
+                                    Button(action: {
+                                        withAnimation {
+                                            items.removeAll { $0.id == item.id }
+                                        }
+                                    }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 20))
+                                            .foregroundColor(Theme.textSecondary)
+                                            .background(Color.white.clipShape(Circle()))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .offset(x: 8, y: -8)
+                                    .frame(maxWidth: .infinity, alignment: .topTrailing)
+                                    .zIndex(2)
+                                }
+                            }
+                        }
+                        .padding(20)
+                    }
+                }
+            }
+        }
+    }
+}
+
 #Preview {
     ContentView(viewModel: ClipboardHistoryViewModel())
 }
