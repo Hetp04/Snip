@@ -397,9 +397,6 @@ struct ClipboardItemRow: View {
                         .help("View extracted text")
                     }
                 }
-                .sheet(isPresented: $showOCRPopup) {
-                    OCRTextPopup(text: item.ocrText ?? "")
-                }
             case .video:
                 MiniVideoMockup()
                     .padding(12)
