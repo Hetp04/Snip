@@ -105,6 +105,47 @@ final class ClipboardHistoryViewModel: ObservableObject {
         psychoCopyManager.handleClipboardChange(item)
         items.insert(item, at: 0)
         Task { await sync(item) }
+        // Run OCR in background immediately after image capture
+        if item.contentType == .image, item.localData != nil {
+            updateItem(id: item.id) { $0.ocrStatus = .pending }
+            triggerOCRInBackground(for: item.id)
+        }
+    }
+    /// Public: trigger OCR for an existing item (e.g. opened in viewer before OCR ran)
+    func triggerOCRIfNeeded(for item: ClipboardItem) {
+        guard item.contentType == .image,
+              item.ocrStatus != .done,
+              item.localData != nil
+        else { return }
+        updateItem(id: item.id) { $0.ocrStatus = .pending }
+        triggerOCRInBackground(for: item.id)
+    }
+    private func triggerOCRInBackground(for itemID: UUID) {
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            let data: Data? = await MainActor.run {
+                self.items.first(where: { $0.id == itemID })?.localData
+            }
+            guard let data, let image = NSImage(data: data) else {
+                await MainActor.run { self.updateItem(id: itemID) { $0.ocrStatus = .failed } }
+                return
+            }
+            do {
+                let boxes = try await OCRService.shared.recognizeText(in: image)
+                await MainActor.run {
+                    self.updateItem(id: itemID) {
+                        if boxes.isEmpty {
+                            $0.ocrStatus = .none
+                        } else {
+                            $0.ocrText   = boxes.map(\.text).joined(separator: " ")
+                            $0.ocrStatus = .done
+                        }
+                    }
+                }
+            } catch {
+                await MainActor.run { self.updateItem(id: itemID) { $0.ocrStatus = .failed } }
+            }
+        }
     }
     private func sync(_ item: ClipboardItem) async {
         do {

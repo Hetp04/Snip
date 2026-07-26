@@ -18,6 +18,8 @@ struct ClipboardItemRow: View {
     var onExpand: () -> Void = {}
     var onPrimaryTap: (() -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
+    /// Opens the OCR live-text viewer. If nil falls back to QuickLook.
+    var onOpenOCRViewer: (() -> Void)? = nil
     @State private var isHovered: Bool = false
     @State private var isCopyHovered: Bool = false
     @State private var isStarHovered: Bool = false
@@ -85,6 +87,14 @@ struct ClipboardItemRow: View {
     private func quickViewImage() {
         guard let data = item.localData else { return }
         QuickLookPreviewer.shared.previewImage(data: data, fileName: item.fileName)
+    }
+    /// Opens the OCR viewer if wired, otherwise falls back to QuickLook.
+    private func openOCRViewer() {
+        if let onOpenOCRViewer {
+            onOpenOCRViewer()
+        } else {
+            quickViewImage()
+        }
     }
     private func openFileInDefaultApp() {
         FileAccessStore.shared.openFile(for: item.id, fallback: item.originalFileURL)
@@ -273,17 +283,18 @@ struct ClipboardItemRow: View {
             radius: 8
         )
         .contentShape(RoundedRectangle(cornerRadius: 24))
-        .onTapGesture {
-            onPrimaryTap?()
-        }
+        // Double-tap MUST come before single-tap so SwiftUI waits for a possible 2nd tap
         .onTapGesture(count: 2) {
             if let onDoubleTap {
                 onDoubleTap()
             } else if resolvedFileURL != nil {
                 revealFileInFinder()
             } else if item.contentType == .image {
-                quickViewImage()
+                openOCRViewer()
             }
+        }
+        .onTapGesture {
+            onPrimaryTap?()
         }
         .onHover { hovering in
             isHovered = hovering

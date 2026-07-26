@@ -30,6 +30,9 @@ struct ClipboardItem: Identifiable {
     var detectedLanguage: String? = nil
     var isDeleted: Bool = false
     var deletedAt: Date? = nil
+    // MARK: - OCR
+    var ocrStatus: OCRStatus = .none
+    var ocrText: String? = nil
     func queuePreviewText() -> String {
         return previewText ?? fileName ?? "Unknown item"
     }

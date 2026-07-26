@@ -754,7 +754,10 @@ struct ClipboardFeedView: View {
                         selectedItemIDs = [item.id]
                         viewModel.copyToPasteboard(item)
                         onItemCopy(item)
-                    }
+                    },
+                    onOpenOCRViewer: item.contentType == .image ? {
+                        ImageTextViewerWindowManager.shared.open(item: item, viewModel: viewModel)
+                    } : nil
                 )
                 .onDrag {
                     let ids = selectedItemIDs.contains(item.id) ? Array(selectedItemIDs) : [item.id]
