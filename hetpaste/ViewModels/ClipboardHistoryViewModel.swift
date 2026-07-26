@@ -130,20 +130,49 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 await MainActor.run { self.updateItem(id: itemID) { $0.ocrStatus = .failed } }
                 return
             }
+
+            // ── Pass 1: Apple Vision (local, instant, private) ────────────
+            var visionText: String = ""
+            var visionBoxes: [OCRBox] = []
             do {
-                let boxes = try await OCRService.shared.recognizeText(in: image)
-                await MainActor.run {
-                    self.updateItem(id: itemID) {
-                        if boxes.isEmpty {
-                            $0.ocrStatus = .none
-                        } else {
-                            $0.ocrText   = boxes.map(\.text).joined(separator: " ")
-                            $0.ocrStatus = .done
-                        }
+                visionBoxes = try await OCRService.shared.recognizeText(in: image)
+                visionText  = visionBoxes.map(\.text).joined(separator: " ")
+                print("[OCR] Vision found \(visionText.count) chars")
+            } catch {
+                print("[OCR] Vision failed: \(error.localizedDescription)")
+            }
+
+            // ── Pass 2: OpenAI fallback disabled for testing (use free Vision only) ──
+            // Threshold: < 20 chars means Vision found essentially nothing useful.
+            let needsFallback = visionText.trimmingCharacters(in: .whitespaces).count < 20
+            var finalText = visionText
+
+            if needsFallback {
+                print("[OCR] Vision result poor (\(visionText.count) chars) — no fallback (testing mode)")
+                // OpenAI fallback disabled to avoid quota costs during testing
+                // Uncomment below when ready to use paid API:
+                // if await OpenAIOCRService.shared.isConfigured {
+                //     do {
+                //         let aiText = try await OpenAIOCRService.shared.extractText(fromData: data)
+                //         if !aiText.isEmpty {
+                //             finalText = aiText
+                //             print("[OCR] OpenAI succeeded: \(aiText.count) chars")
+                //         }
+                //     } catch {
+                //         print("[OpenAI-OCR] Fallback failed: \(error.localizedDescription)")
+                //     }
+                // }
+            }
+
+            await MainActor.run {
+                self.updateItem(id: itemID) {
+                    if finalText.trimmingCharacters(in: .whitespaces).isEmpty {
+                        $0.ocrStatus = .none
+                    } else {
+                        $0.ocrText   = finalText
+                        $0.ocrStatus = .done
                     }
                 }
-            } catch {
-                await MainActor.run { self.updateItem(id: itemID) { $0.ocrStatus = .failed } }
             }
         }
     }
