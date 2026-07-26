@@ -24,6 +24,7 @@ struct ClipboardItemRow: View {
     @State private var isCopyHovered: Bool = false
     @State private var isStarHovered: Bool = false
     @State private var isExpandHovered: Bool = false
+    @State private var showOCRPopup: Bool = false
     private var headerIcon: NSImage? {
         if let bid = item.sourceAppBundleID, !bid.isEmpty {
             if let img = IconCache.shared.cachedAppIcon(bundleID: bid) {
@@ -355,7 +356,30 @@ struct ClipboardItemRow: View {
                 )
             switch item.contentType {
             case .image:
-                PasteImagePreview(data: item.localData)
+                ZStack(alignment: .topTrailing) {
+                    PasteImagePreview(data: item.localData)
+                    
+                    // OCR Icon Badge for images
+                    if item.ocrStatus == .done, let ocrText = item.ocrText, !ocrText.isEmpty {
+                        Button(action: { showOCRPopup = true }) {
+                            Image(systemName: "text.viewfinder")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 32, height: 32)
+                                .background(
+                                    Circle()
+                                        .fill(Theme.accent)
+                                        .shadow(color: Color.black.opacity(0.25), radius: 4, y: 2)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .padding(12)
+                        .help("View extracted text")
+                    }
+                }
+                .sheet(isPresented: $showOCRPopup) {
+                    OCRTextPopup(text: item.ocrText ?? "")
+                }
             case .video:
                 MiniVideoMockup()
                     .padding(12)
@@ -596,11 +620,29 @@ struct ClipboardItemRow: View {
     @ViewBuilder
     private var contentPreviewSection: some View {
         if item.contentType == .image || item.contentType == .video {
-            ZStack {
+            ZStack(alignment: .topTrailing) {
                 if item.contentType == .video {
                     MiniVideoMockup()
                 } else {
                     MiniImagePreview(data: item.localData, fitImage: stripMode)
+                }
+                
+                // OCR Icon Badge for images
+                if item.contentType == .image, item.ocrStatus == .done, let ocrText = item.ocrText, !ocrText.isEmpty {
+                    Button(action: { showOCRPopup = true }) {
+                        Image(systemName: "text.viewfinder")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 24, height: 24)
+                            .background(
+                                Circle()
+                                    .fill(Theme.accent)
+                                    .shadow(color: Color.black.opacity(0.2), radius: 3, y: 2)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(6)
+                    .help("View extracted text")
                 }
             }
             .frame(maxWidth: .infinity)
@@ -609,6 +651,9 @@ struct ClipboardItemRow: View {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Theme.border, lineWidth: 0.5)
             )
+            .sheet(isPresented: $showOCRPopup) {
+                OCRTextPopup(text: item.ocrText ?? "")
+            }
         } else if item.contentType == .file {
             let name = item.fileName ?? item.contentText ?? "File"
             let rawExt = URL(fileURLWithPath: name).pathExtension
@@ -1117,6 +1162,85 @@ struct MiniFileMockup: View {
         )
     }
 }
+
+// MARK: - OCR Text Popup
+struct OCRTextPopup: View {
+    let text: String
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Header
+            HStack {
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(Theme.accent)
+                Text("Extracted Text")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(Theme.textPrimary)
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundColor(Theme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Close")
+            }
+            .padding(.bottom, 4)
+            
+            Divider()
+                .background(Theme.divider)
+            
+            // Text Content
+            ScrollView {
+                Text(text)
+                    .font(.system(size: 14, weight: .regular))
+                    .foregroundColor(Theme.textPrimary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Theme.codeBlock)
+                    )
+            }
+            .frame(maxHeight: 400)
+            
+            // Footer with Copy Button
+            HStack {
+                Text("\(text.count) characters")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Theme.textTertiary)
+                Spacer()
+                Button(action: {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Copy Text")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Theme.accent)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Copy extracted text to clipboard")
+            }
+        }
+        .padding(20)
+        .frame(width: 500)
+        .background(Theme.bg)
+    }
+}
+
 #Preview {
     VStack(spacing: 8) {
         ClipboardItemRow(
