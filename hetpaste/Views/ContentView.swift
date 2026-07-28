@@ -760,7 +760,12 @@ struct ClipboardFeedView: View {
                     } : nil
                 )
                 .onDrag {
+                    // Select this item when drag starts
+                    if !selectedItemIDs.contains(item.id) {
+                        selectedItemIDs = [item.id]
+                    }
                     let ids = selectedItemIDs.contains(item.id) ? Array(selectedItemIDs) : [item.id]
+                    print("🔵 Starting drag for item: \(item.id), payload IDs: \(ids)")
                     return viewModel.folderDragItemProvider(for: ids)
                 }
             }
@@ -929,10 +934,14 @@ struct FolderCardView: View {
         }
     }
     private func loadClipboardItemIDs(from provider: NSItemProvider) {
+        print("🟢 FolderCardView: loadClipboardItemIDs called")
         let identifiers = [UTType.hetpasteFolderItemIDs.identifier, UTType.utf8PlainText.identifier, UTType.text.identifier]
+        print("🟢 Looking for identifiers: \(identifiers)")
         guard let identifier = identifiers.first(where: { provider.hasItemConformingToTypeIdentifier($0) }) else {
+            print("🔴 No matching identifier found in provider")
             return
         }
+        print("🟢 Found identifier: \(identifier)")
         provider.loadItem(forTypeIdentifier: identifier, options: nil) { item, _ in
             let raw: String?
             if let data = item as? Data {
@@ -944,16 +953,22 @@ struct FolderCardView: View {
             } else {
                 raw = nil
             }
+            print("🟢 Raw data: \(raw ?? "nil")")
             let ids = (raw ?? "")
                 .split(separator: ",")
                 .compactMap { UUID(uuidString: String($0)) }
-            guard !ids.isEmpty else { return }
+            guard !ids.isEmpty else {
+                print("🔴 No valid UUIDs parsed")
+                return
+            }
+            print("🟢 Parsed \(ids.count) item IDs: \(ids)")
             DispatchQueue.main.async {
                 // Trigger drop animation
                 withAnimation(.spring(response: 0.2, dampingFraction: 0.5)) {
                     self.dropAnimating = true
                 }
                 
+                print("🟢 Calling onDropItems with \(ids.count) items")
                 self.onDropItems(ids)
                 
                 // Reset animation
