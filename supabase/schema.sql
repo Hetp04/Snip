@@ -61,3 +61,65 @@ create policy "clipboard_storage_update" on storage.objects
     for update using (bucket_id in ('clipboard-images','clipboard-files','clipboard-videos','clipboard-previews'));
 create policy "clipboard_storage_delete" on storage.objects
     for delete using (bucket_id in ('clipboard-images','clipboard-files','clipboard-videos','clipboard-previews'));
+
+-- Wardrobe items schema
+create table if not exists public.wardrobe_items (
+    id               uuid primary key default gen_random_uuid(),
+    user_id          uuid references auth.users(id) on delete cascade,
+    content_type     text not null,
+    content          text,
+    source           text not null default 'external',
+    source_snippet_id uuid,
+    source_app_name  text,
+    source_bundle_id text,
+    storage_path     text,
+    file_name        text,
+    file_size        bigint,
+    mime_type        text,
+    created_at       timestamptz not null default now()
+);
+
+create index if not exists wardrobe_items_user_id_idx
+    on public.wardrobe_items (user_id);
+create index if not exists wardrobe_items_created_at_idx
+    on public.wardrobe_items (created_at desc);
+
+alter table public.wardrobe_items enable row level security;
+
+drop policy if exists "wardrobe_select" on public.wardrobe_items;
+drop policy if exists "wardrobe_insert" on public.wardrobe_items;
+drop policy if exists "wardrobe_update" on public.wardrobe_items;
+drop policy if exists "wardrobe_delete" on public.wardrobe_items;
+
+create policy "wardrobe_select" on public.wardrobe_items
+    for select using (true);
+create policy "wardrobe_insert" on public.wardrobe_items
+    for insert with check (true);
+create policy "wardrobe_update" on public.wardrobe_items
+    for update using (true) with check (true);
+create policy "wardrobe_delete" on public.wardrobe_items
+    for delete using (true);
+
+-- Wardrobe storage bucket
+insert into storage.buckets (id, name, public)
+values ('wardrobe-items', 'wardrobe-items', true)
+on conflict (id) do nothing;
+
+drop policy if exists "wardrobe_storage_read" on storage.objects;
+drop policy if exists "wardrobe_storage_write" on storage.objects;
+drop policy if exists "wardrobe_storage_update" on storage.objects;
+drop policy if exists "wardrobe_storage_delete" on storage.objects;
+
+create policy "wardrobe_storage_read" on storage.objects
+    for select using (bucket_id = 'wardrobe-items');
+create policy "wardrobe_storage_write" on storage.objects
+    for insert with check (bucket_id = 'wardrobe-items');
+create policy "wardrobe_storage_update" on storage.objects
+    for update using (bucket_id = 'wardrobe-items');
+create policy "wardrobe_storage_delete" on storage.objects
+    for delete using (bucket_id = 'wardrobe-items');
+
+
+-- Add file_extension column for icon lookup
+ALTER TABLE public.wardrobe_items
+ADD COLUMN IF NOT EXISTS file_extension text;

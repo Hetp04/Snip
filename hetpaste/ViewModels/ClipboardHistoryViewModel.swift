@@ -4,6 +4,7 @@ import Foundation
 import UniformTypeIdentifiers
 extension UTType {
     static let hetpasteFolderItemIDs = UTType(exportedAs: "com.hetpaste.folder-item-ids")
+    static let hetpasteWardrobeItemID = UTType(exportedAs: "com.hetpaste.wardrobe-item-id")
 }
 struct ClipboardRestoreResult {
     let didCopy: Bool
@@ -487,6 +488,13 @@ final class ClipboardHistoryViewModel: ObservableObject {
         provider.registerDataRepresentation(forTypeIdentifier: UTType.hetpasteFolderItemIDs.identifier, visibility: .all) { completion in
             completion(payload.data(using: .utf8), nil)
             return nil
+        }
+        // Also register for wardrobe drops
+        if itemIDs.count == 1, let itemID = itemIDs.first {
+            provider.registerDataRepresentation(forTypeIdentifier: UTType.hetpasteWardrobeItemID.identifier, visibility: .all) { completion in
+                completion(itemID.uuidString.data(using: .utf8), nil)
+                return nil
+            }
         }
         return provider
     }

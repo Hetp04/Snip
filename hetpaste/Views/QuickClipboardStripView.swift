@@ -10,6 +10,7 @@ final class QuickClipboardStripController: ObservableObject {
     @Published var focusedIndex: Int = 0
     @Published var selectedFolderID: UUID?
     @Published var selectedContentType: ContentType?
+    @Published var isWardrobeSelected: Bool = false
     @Published var toastMessage: String?
     @Published var isToastError: Bool = false
     @Published var previewItem: ClipboardItem?
@@ -65,6 +66,7 @@ final class QuickClipboardStripController: ObservableObject {
 struct QuickClipboardStripView: View {
     @ObservedObject var viewModel: ClipboardHistoryViewModel
     @ObservedObject var controller: QuickClipboardStripController
+    @ObservedObject var wardrobeViewModel: WardrobeViewModel
     let onClose: () -> Void
     let onOpenFullApp: (ClipboardItem) -> Void
     let onExpandFullApp: (ClipboardItem) -> Void
@@ -160,27 +162,53 @@ struct QuickClipboardStripView: View {
                 controller.selectedFolderID = nil
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("AddToWardrobeFromClipboard"))) { notification in
+            if let itemID = notification.userInfo?["itemID"] as? UUID,
+               let item = viewModel.items.first(where: { $0.id == itemID }) {
+                Task {
+                    await wardrobeViewModel.addFromClipboardItem(item)
+                }
+            }
+        }
     }
     private var stripContent: some View {
         ScrollViewReader { proxy in
             Group {
-                if filteredItems.isEmpty {
+                if controller.isWardrobeSelected {
+                    WardrobeView(viewModel: wardrobeViewModel, controller: controller)
+                } else if filteredItems.isEmpty {
                     emptyState
                 } else {
                     stripCardsScroll
                 }
             }
             .onAppear {
-                controller.syncFocus(itemCount: filteredItems.count)
+                let itemCount = controller.isWardrobeSelected ? wardrobeViewModel.items.count : filteredItems.count
+                controller.syncFocus(itemCount: itemCount)
             }
             .onChange(of: filteredItems.count) { _, newCount in
-                controller.syncFocus(itemCount: newCount)
+                if !controller.isWardrobeSelected {
+                    controller.syncFocus(itemCount: newCount)
+                }
+            }
+            .onChange(of: wardrobeViewModel.items.count) { _, newCount in
+                if controller.isWardrobeSelected {
+                    controller.syncFocus(itemCount: newCount)
+                }
+            }
+            .onChange(of: controller.isWardrobeSelected) { _, isWardrobe in
+                let itemCount = isWardrobe ? wardrobeViewModel.items.count : filteredItems.count
+                controller.syncFocus(itemCount: itemCount)
             }
             .onChange(of: controller.selectedFolderID) { _, _ in
-                controller.syncFocus(itemCount: filteredItems.count)
+                if !controller.isWardrobeSelected {
+                    controller.syncFocus(itemCount: filteredItems.count)
+                }
             }
             .onChange(of: controller.selectedContentType) { _, _ in
-                controller.syncFocus(itemCount: filteredItems.count)
+                if !controller.isWardrobeSelected {
+                    controller.syncFocus(itemCount: filteredItems.count)
+                }
             }
             .onChange(of: controller.focusedIndex) { _, _ in
                 scrollToFocusedCard(using: proxy)
@@ -290,6 +318,10 @@ struct QuickClipboardStripView: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
                 typeFilterDropdown
+                
+                // Wardrobe tab
+                wardrobeChip
+                
                 Divider()
                     .frame(height: 20)
                 HStack(spacing: 6) {
@@ -586,6 +618,48 @@ struct QuickClipboardStripView: View {
         case .text: return "Text"
         }
     }
+    
+    // MARK: - Wardrobe
+    
+    private var wardrobeChip: some View {
+        Button(action: {
+            controller.isWardrobeSelected.toggle()
+            if controller.isWardrobeSelected {
+                controller.selectedFolderID = nil
+                controller.selectedContentType = nil
+            }
+            controller.hidePreview()
+        }) {
+            HStack(spacing: 7) {
+                Image(systemName: "hanger")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(controller.isWardrobeSelected ? .white : Theme.textPrimary)
+                Text("My Wardrobe")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .foregroundColor(controller.isWardrobeSelected ? .white : Theme.textPrimary)
+                Text("\(wardrobeViewModel.items.count)")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(controller.isWardrobeSelected ? .white.opacity(0.9) : Theme.textSecondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(minHeight: 32)
+            .background(
+                Capsule()
+                    .fill(controller.isWardrobeSelected ? Color.purple : Theme.card)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(controller.isWardrobeSelected ? Color.purple : Theme.border, lineWidth: 0.75)
+            )
+            .contentShape(Capsule())
+            .padding(.vertical, 3)
+        }
+        .buttonStyle(.plain)
+        .help("My Wardrobe — drag items here to save for later")
+    }
+    
     private var emptyState: some View {
         let iconName: String = controller.selectedContentType != nil
             ? previewIcon(for: controller.selectedContentType!)
@@ -792,6 +866,7 @@ struct QuickClipboardStripView: View {
     QuickClipboardStripView(
         viewModel: ClipboardHistoryViewModel(),
         controller: QuickClipboardStripController(),
+        wardrobeViewModel: WardrobeViewModel(),
         onClose: {},
         onOpenFullApp: { _ in },
         onExpandFullApp: { _ in }

@@ -17,6 +17,7 @@ private final class ClipboardStripPanel: NSPanel {
 class AppDelegate: NSObject, NSApplicationDelegate {
     let viewModel = ClipboardHistoryViewModel()
     let stripController = QuickClipboardStripController()
+    let wardrobeViewModel = WardrobeViewModel()
     var statusItem: NSStatusItem?
     private var stripPanel: NSPanel?
     private var hudPanel: NSPanel?
@@ -25,6 +26,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var globalEventMonitor: Any?
     private var psychoCopyModeObserver: NSObjectProtocol?
     private var hudCancellables = Set<AnyCancellable>()
+    private var menuBarDropView: MenuBarDropView?
+    private var originalButtonImage: NSImage?
+    private var feedbackTimer: Timer?
     private var visibleStripItems: [ClipboardItem] {
         var result = viewModel.items
         if let folderID = stripController.selectedFolderID {
@@ -42,6 +46,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.action = #selector(toggleClipboardStrip(_:))
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            
+            // Set up drop view for menu bar icon
+            setupMenuBarDropTarget(button: button)
         }
         NotificationCenter.default.addObserver(
             self,
@@ -71,6 +78,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             self?.stripController.showToast("Secure field — press ⌘V manually", isError: false)
         }
+    }
+    
+    private func setupMenuBarDropTarget(button: NSButton) {
+        let dropView = MenuBarDropView(frame: button.bounds)
+        dropView.delegate = self
+        dropView.autoresizingMask = [.width, .height]
+        button.addSubview(dropView)
+        self.menuBarDropView = dropView
     }
     @objc func toggleClipboardStrip(_ sender: AnyObject?) {
         if NSApp.currentEvent?.type == .rightMouseUp {
@@ -148,6 +163,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: QuickClipboardStripView(
                 viewModel: viewModel,
                 controller: stripController,
+                wardrobeViewModel: wardrobeViewModel,
                 onClose: { [weak self] in
                     self?.closeClipboardStrip()
                 },
@@ -413,5 +429,162 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let forbidden: NSEvent.ModifierFlags = [.command, .control, .option, .shift]
         return flags.intersection(forbidden).isEmpty
+    }
+}
+
+
+// MARK: - MenuBarDropViewDelegate
+
+extension AppDelegate: MenuBarDropViewDelegate {
+    func menuBarDropView(_ view: MenuBarDropView, didReceiveDropWithProviders providers: [NSItemProvider], sourceApp: NSRunningApplication?) {
+        Task {
+            // Filter out if source is our own app (edge case)
+            let validSourceApp: NSRunningApplication?
+            if let app = sourceApp, app.bundleIdentifier != Bundle.main.bundleIdentifier {
+                validSourceApp = app
+            } else {
+                validSourceApp = nil
+            }
+            
+            await wardrobeViewModel.addFromDrop(providers: providers, sourceApp: validSourceApp)
+            // Success feedback
+            await showSuccessFeedback()
+        }
+    }
+    
+    func menuBarDropViewDidBeginHover(_ view: MenuBarDropView) {
+        guard let button = statusItem?.button else { return }
+        
+        // Save original image if not already saved
+        if originalButtonImage == nil {
+            originalButtonImage = button.image
+        }
+        
+        // Change to highlighted state - purple tint to indicate wardrobe
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            button.contentTintColor = NSColor.systemPurple
+            
+            // Slight scale animation
+            button.animator().alphaValue = 1.0
+        }
+        
+        // Change icon to hanger to indicate wardrobe drop
+        button.image = NSImage(systemSymbolName: "hanger", accessibilityDescription: "Drop to Wardrobe")
+    }
+    
+    func menuBarDropViewDidEndHover(_ view: MenuBarDropView) {
+        guard let button = statusItem?.button else { return }
+        
+        // Restore original appearance
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            button.contentTintColor = nil
+        }
+        
+        // Restore original icon
+        if let original = originalButtonImage {
+            button.image = original
+        } else {
+            updateStatusBarIcon() // Fallback to regular update
+        }
+    }
+    
+    private func showSuccessFeedback() async {
+        guard let button = statusItem?.button else { return }
+        
+        // Cancel any existing feedback
+        feedbackTimer?.invalidate()
+        
+        // Quick bounce animation and checkmark
+        await MainActor.run {
+            let originalFrame = button.frame
+            
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.12
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                button.animator().frame = originalFrame.insetBy(dx: -2, dy: -2)
+            }, completionHandler: {
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = 0.12
+                    context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                    button.animator().frame = originalFrame
+                })
+            })
+            
+            // Show checkmark briefly
+            button.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Added to Wardrobe")
+            button.contentTintColor = NSColor.systemGreen
+        }
+        
+        // Wait a moment
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        
+        // Restore icon
+        await MainActor.run {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                button.contentTintColor = nil
+            }
+            
+            if let original = originalButtonImage {
+                button.image = original
+                originalButtonImage = nil
+            } else {
+                updateStatusBarIcon()
+            }
+        }
+    }
+    
+    private func showErrorFeedback() async {
+        guard let button = statusItem?.button else { return }
+        
+        // Cancel any existing feedback
+        feedbackTimer?.invalidate()
+        
+        // Shake animation
+        await MainActor.run {
+            let originalFrame = button.frame
+            
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.08
+                button.animator().frame = originalFrame.offsetBy(dx: -3, dy: 0)
+            }, completionHandler: {
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = 0.08
+                    button.animator().frame = originalFrame.offsetBy(dx: 3, dy: 0)
+                }, completionHandler: {
+                    NSAnimationContext.runAnimationGroup({ context in
+                        context.duration = 0.08
+                        button.animator().frame = originalFrame
+                    })
+                })
+            })
+            
+            // Show error icon briefly
+            button.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Failed")
+            button.contentTintColor = NSColor.systemRed
+            
+            // Play error sound
+            NSSound.beep()
+        }
+        
+        // Wait a moment
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        
+        // Restore icon
+        await MainActor.run {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                button.contentTintColor = nil
+            }
+            
+            if let original = originalButtonImage {
+                button.image = original
+                originalButtonImage = nil
+            } else {
+                updateStatusBarIcon()
+            }
+        }
     }
 }
