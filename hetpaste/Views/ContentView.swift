@@ -837,13 +837,16 @@ struct FolderCardView: View {
     let onCommitRename: () -> Void
     let onDelete: () -> Void
     let onDropItems: ([UUID]) -> Void
+    
     @State private var isTargeted: Bool = false
+    @State private var dropAnimating: Bool = false
     @FocusState private var isNameFocused: Bool
+    
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "folder.fill")
+            Image(systemName: isTargeted ? "folder.fill.badge.plus" : "folder.fill")
                 .font(.system(size: 18, weight: .medium))
-                .foregroundColor(Color(hex: "#3A3A3C"))
+                .foregroundColor(isTargeted ? Theme.accent : Color(hex: "#3A3A3C"))
             if isEditing {
                 TextField("Folder name", text: $editingName)
                     .textFieldStyle(.plain)
@@ -854,11 +857,18 @@ struct FolderCardView: View {
             } else {
                 Text(folder.name)
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(Color(hex: "#1C1C1E"))
+                    .foregroundColor(isTargeted ? Theme.accent : Color(hex: "#1C1C1E"))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
             Spacer(minLength: 0)
+            if !isEditing {
+                Text("\(itemCount)")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(isTargeted ? Theme.accent : Theme.textSecondary)
+                    .scaleEffect(dropAnimating ? 1.2 : 1.0)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.5), value: dropAnimating)
+            }
             Button {
                 onBeginRename()
             } label: {
@@ -879,10 +889,10 @@ struct FolderCardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 14)
-                .fill(Theme.selection)
+                .fill(isTargeted ? Theme.accent.opacity(0.08) : Theme.selection)
                 .softInnerShadow(
                     RoundedRectangle(cornerRadius: 14),
-                    darkShadow: Color.black.opacity(isTargeted ? 0.25 : 0.15),
+                    darkShadow: Color.black.opacity(isTargeted ? 0.3 : 0.15),
                     lightShadow: Color.white.opacity(0.6),
                     spread: 0.05,
                     radius: 3
@@ -890,8 +900,9 @@ struct FolderCardView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .stroke(isTargeted ? Theme.accent : Color.clear, lineWidth: isTargeted ? 1.5 : 0)
+                .stroke(isTargeted ? Theme.accent : Color.clear, lineWidth: isTargeted ? 2 : 0)
         )
+        .scaleEffect(isTargeted ? 1.03 : 1.0)
         .contentShape(Rectangle())
         .onTapGesture {
             if !isEditing {
@@ -907,6 +918,7 @@ struct FolderCardView: View {
             loadClipboardItemIDs(from: provider)
             return true
         }
+        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isTargeted)
         .onAppear {
             if isEditing {
                 isNameFocused = true
@@ -937,7 +949,19 @@ struct FolderCardView: View {
                 .compactMap { UUID(uuidString: String($0)) }
             guard !ids.isEmpty else { return }
             DispatchQueue.main.async {
-                onDropItems(ids)
+                // Trigger drop animation
+                withAnimation(.spring(response: 0.2, dampingFraction: 0.5)) {
+                    self.dropAnimating = true
+                }
+                
+                self.onDropItems(ids)
+                
+                // Reset animation
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    withAnimation {
+                        self.dropAnimating = false
+                    }
+                }
             }
         }
     }
