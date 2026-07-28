@@ -27,6 +27,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var psychoCopyModeObserver: NSObjectProtocol?
     private var hudCancellables = Set<AnyCancellable>()
     private var menuBarDropView: MenuBarDropView?
+    private var dropPreviewPopover: NSPopover?
+    private var dropPreviewController: MenuBarDropPreviewViewController?
+    private var dropPreviewCloseWorkItem: DispatchWorkItem?
+    private var dropPreviewSourceApp: NSRunningApplication?
+    private var isProcessingMenuBarDrop = false
     private var originalButtonImage: NSImage?
     private var feedbackTimer: Timer?
     private var visibleStripItems: [ClipboardItem] {
@@ -432,11 +437,125 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+@MainActor
+private final class MenuBarDropPreviewViewController: NSViewController {
+    private let iconView = NSImageView()
+    private let label = NSTextField(labelWithString: "Drop to save to Wardrobe")
+    var onDragEntered: (() -> Void)?
+    var onDragExited: (() -> Void)?
+    var onDrop: (([NSItemProvider]) -> Bool)?
+
+    override func loadView() {
+        let contentView = MenuBarDropPreviewContentView(frame: NSRect(x: 0, y: 0, width: 238, height: 76))
+        contentView.onDragEntered = { [weak self] in self?.onDragEntered?() }
+        contentView.onDragExited = { [weak self] in self?.onDragExited?() }
+        contentView.onDrop = { [weak self] providers in self?.onDrop?(providers) ?? false }
+        view = contentView
+
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .labelColor
+        label.lineBreakMode = .byTruncatingTail
+
+        contentView.addSubview(iconView)
+        contentView.addSubview(label)
+        NSLayoutConstraint.activate([
+            iconView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 21),
+            iconView.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 25),
+            iconView.heightAnchor.constraint(equalToConstant: 25),
+            label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 11),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -16),
+            label.centerYAnchor.constraint(equalTo: contentView.centerYAnchor)
+        ])
+        showReady()
+    }
+
+    func showReady() {
+        guard isViewLoaded else { return }
+        iconView.image = NSImage(systemSymbolName: "hanger", accessibilityDescription: "Wardrobe drop target")
+        iconView.contentTintColor = .systemPurple
+        label.stringValue = "Drop to save to Wardrobe"
+        (view as? MenuBarDropPreviewContentView)?.accentColor = .systemPurple
+    }
+
+    func showSuccess() {
+        guard isViewLoaded else { return }
+        iconView.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Saved to Wardrobe")
+        iconView.contentTintColor = .systemGreen
+        label.stringValue = "Saved to Wardrobe"
+        (view as? MenuBarDropPreviewContentView)?.accentColor = .systemGreen
+    }
+}
+
+private final class MenuBarDropPreviewContentView: NSView {
+    private let borderLayer = CAShapeLayer()
+    var onDragEntered: (() -> Void)?
+    var onDragExited: (() -> Void)?
+    var onDrop: (([NSItemProvider]) -> Bool)?
+    var accentColor: NSColor = .systemPurple {
+        didSet {
+            borderLayer.strokeColor = accentColor.withAlphaComponent(0.8).cgColor
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
+        layer?.cornerRadius = 11
+        borderLayer.fillColor = NSColor.clear.cgColor
+        borderLayer.strokeColor = accentColor.withAlphaComponent(0.8).cgColor
+        borderLayer.lineWidth = 1.5
+        borderLayer.lineDashPattern = [5, 4]
+        layer?.addSublayer(borderLayer)
+        registerForDraggedTypes(MenuBarDropView.acceptedDropTypes)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        let borderBounds = bounds.insetBy(dx: 8, dy: 8)
+        borderLayer.frame = bounds
+        borderLayer.path = CGPath(roundedRect: borderBounds, cornerWidth: 8, cornerHeight: 8, transform: nil)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        onDragEntered?()
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        onDragExited?()
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let providers = MenuBarDropView.itemProviders(from: sender.draggingPasteboard)
+        guard !providers.isEmpty else { return false }
+        return onDrop?(providers) ?? false
+    }
+}
+
 
 // MARK: - MenuBarDropViewDelegate
 
 extension AppDelegate: MenuBarDropViewDelegate {
     func menuBarDropView(_ view: MenuBarDropView, didReceiveDropWithProviders providers: [NSItemProvider], sourceApp: NSRunningApplication?) {
+        processMenuBarDrop(providers: providers, sourceApp: sourceApp)
+    }
+
+    private func processMenuBarDrop(providers: [NSItemProvider], sourceApp: NSRunningApplication?) {
+        dropPreviewCloseWorkItem?.cancel()
+        isProcessingMenuBarDrop = true
         Task {
             // Filter out if source is our own app (edge case)
             let validSourceApp: NSRunningApplication?
@@ -471,10 +590,21 @@ extension AppDelegate: MenuBarDropViewDelegate {
         
         // Change icon to hanger to indicate wardrobe drop
         button.image = NSImage(systemSymbolName: "hanger", accessibilityDescription: "Drop to Wardrobe")
+        showDropPreview(relativeTo: view)
+        setDropTargetRing(on: view, active: true)
     }
     
     func menuBarDropViewDidEndHover(_ view: MenuBarDropView) {
+        scheduleDropPreviewClose()
+    }
+
+    private func restoreMenuBarDropAppearance() {
         guard let button = statusItem?.button else { return }
+
+        hideDropPreview()
+        if let dropView = menuBarDropView {
+            setDropTargetRing(on: dropView, active: false)
+        }
         
         // Restore original appearance
         NSAnimationContext.runAnimationGroup { context in
@@ -498,6 +628,7 @@ extension AppDelegate: MenuBarDropViewDelegate {
         
         // Quick bounce animation and checkmark
         await MainActor.run {
+            dropPreviewController?.showSuccess()
             let originalFrame = button.frame
             
             NSAnimationContext.runAnimationGroup({ context in
@@ -518,10 +649,15 @@ extension AppDelegate: MenuBarDropViewDelegate {
         }
         
         // Wait a moment
-        try? await Task.sleep(nanoseconds: 600_000_000)
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
         
         // Restore icon
         await MainActor.run {
+            hideDropPreview()
+            isProcessingMenuBarDrop = false
+            if let dropView = menuBarDropView {
+                setDropTargetRing(on: dropView, active: false)
+            }
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.2
                 button.contentTintColor = nil
@@ -534,6 +670,74 @@ extension AppDelegate: MenuBarDropViewDelegate {
                 updateStatusBarIcon()
             }
         }
+    }
+
+    private func showDropPreview(relativeTo dropView: NSView) {
+        dropPreviewCloseWorkItem?.cancel()
+        dropPreviewSourceApp = NSWorkspace.shared.frontmostApplication
+        let controller = dropPreviewController ?? MenuBarDropPreviewViewController()
+        controller.onDragEntered = { [weak self] in
+            self?.dropPreviewCloseWorkItem?.cancel()
+        }
+        controller.onDragExited = { [weak self] in
+            self?.scheduleDropPreviewClose()
+        }
+        controller.onDrop = { [weak self] providers in
+            guard let self else { return false }
+            self.dropPreviewCloseWorkItem?.cancel()
+            self.processMenuBarDrop(providers: providers, sourceApp: self.dropPreviewSourceApp)
+            return true
+        }
+        controller.showReady()
+        dropPreviewController = controller
+
+        let popover = dropPreviewPopover ?? {
+            let popover = NSPopover()
+            popover.behavior = .applicationDefined
+            popover.animates = true
+            popover.contentSize = NSSize(width: 238, height: 76)
+            dropPreviewPopover = popover
+            return popover
+        }()
+        popover.contentViewController = controller
+
+        if !popover.isShown {
+            popover.show(relativeTo: dropView.bounds, of: dropView, preferredEdge: .minY)
+        }
+    }
+
+    private func hideDropPreview() {
+        dropPreviewCloseWorkItem?.cancel()
+        dropPreviewCloseWorkItem = nil
+        dropPreviewSourceApp = nil
+        dropPreviewPopover?.performClose(nil)
+        dropPreviewController?.showReady()
+    }
+
+    private func scheduleDropPreviewClose() {
+        guard !isProcessingMenuBarDrop else { return }
+        dropPreviewCloseWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.restoreMenuBarDropAppearance()
+        }
+        dropPreviewCloseWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+    }
+
+    private func setDropTargetRing(on view: NSView, active: Bool, color: NSColor = .systemPurple) {
+        view.wantsLayer = true
+        guard let layer = view.layer else { return }
+
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.12)
+        layer.cornerRadius = max(5, min(view.bounds.width, view.bounds.height) / 2)
+        layer.borderWidth = active ? 1.5 : 0
+        layer.borderColor = color.cgColor
+        layer.shadowColor = color.cgColor
+        layer.shadowOpacity = active ? 0.75 : 0
+        layer.shadowRadius = active ? 5 : 0
+        layer.shadowOffset = .zero
+        CATransaction.commit()
     }
     
     private func showErrorFeedback() async {

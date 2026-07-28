@@ -402,20 +402,6 @@ struct QuickClipboardStripView: View {
     }
     private func stripCard(for item: ClipboardItem, index: Int) -> some View {
         VStack(spacing: 8) {
-            if index < 9 {
-                Text("\(index + 1)")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(Theme.textSecondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule()
-                            .fill(Theme.card)
-                            .shadow(color: Color.black.opacity(0.08), radius: 2, y: 1)
-                    )
-            } else {
-                Spacer().frame(height: 22)
-            }
             ClipboardItemRow(
                 item: item,
                 isSelected: controller.focusedIndex == index,

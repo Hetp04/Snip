@@ -182,7 +182,7 @@ final class ClipboardService: ObservableObject {
             originalFileURL: url,
             localData: data
         )
-        FileAccessStore.shared.save(url: url, for: item.id)
+        try? FileAccessStore.shared.save(url: url, for: item.id)
         let icon = IconCache.shared.fileIcon(for: url)
         IconCache.shared.saveFileIcon(icon, forItemId: item.id)
         return item

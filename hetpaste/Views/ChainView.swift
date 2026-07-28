@@ -182,13 +182,20 @@ struct ChainCardView: View {
                 }
         }
         .padding(12)
-        .background(Theme.neoBase)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .softInnerShadow(RoundedRectangle(cornerRadius: 16), darkShadow: Color.black.opacity(0.3), lightShadow: Color.white, spread: 0.05, radius: isHovered ? 2 : 1)
-        .contentShape(RoundedRectangle(cornerRadius: 16))
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Theme.neoBase)
+                .softInnerShadow(
+                    RoundedRectangle(cornerRadius: 16),
+                    darkShadow: Color.black.opacity(0.3),
+                    lightShadow: Color.white,
+                    spread: 0.05,
+                    radius: isHovered ? 2 : 1
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 16))
+                .onTapGesture(perform: onOpen)
+        )
         .onHover { isHovered = $0 }
-        .onTapGesture(perform: onOpen)
     }
 }
-
 

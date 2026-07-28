@@ -129,6 +129,9 @@ struct WardrobeView: View {
                     viewModel.deleteItem(item)
                 }
             },
+            onRevealInFinder: {
+                revealWardrobeItemInFinder(item)
+            },
             onPrimaryTap: {
                 controller.focusItem(at: index, itemCount: viewModel.items.count)
             }
@@ -147,6 +150,13 @@ struct WardrobeView: View {
             controller.showToast(result.message, isError: !result.didCopy)
         }
     }
+
+    private func revealWardrobeItemInFinder(_ item: WardrobeItem) {
+        let result = viewModel.revealInFinder(item)
+        if !result.didReveal {
+            controller.showToast(result.message, isError: true)
+        }
+    }
     
     private func scrollToFocusedCard(using proxy: ScrollViewProxy) {
         guard viewModel.items.indices.contains(controller.focusedIndex) else { return }
@@ -157,19 +167,28 @@ struct WardrobeView: View {
     }
     
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        // Check if this is an internal clipboard item drop
-        if let provider = providers.first,
-           provider.hasItemConformingToTypeIdentifier(UTType.hetpasteWardrobeItemID.identifier) {
+        let internalProviders = providers.filter {
+            $0.hasItemConformingToTypeIdentifier(UTType.hetpasteWardrobeItemID.identifier)
+        }
+        let externalProviders = providers.filter {
+            !$0.hasItemConformingToTypeIdentifier(UTType.hetpasteWardrobeItemID.identifier)
+        }
+
+        // Process every provider in a multi-selection, including mixed drops.
+        for provider in internalProviders {
             handleInternalItemDrop(provider: provider)
-            return true
         }
-        
-        // Otherwise handle as external drop
-        Task {
-            await viewModel.addFromDrop(providers: providers)
-            controller.showToast("Added to Wardrobe", isError: false)
+        if !externalProviders.isEmpty {
+            Task {
+                await viewModel.addFromDrop(providers: externalProviders)
+                let count = externalProviders.count
+                controller.showToast(
+                    count == 1 ? "Added to Wardrobe" : "Added \(count) items to Wardrobe",
+                    isError: false
+                )
+            }
         }
-        return true
+        return !providers.isEmpty
     }
     
     private func handleInternalItemDrop(provider: NSItemProvider) {
@@ -217,6 +236,7 @@ struct WardrobeItemCard: View {
     let isSelected: Bool
     let onCopy: () -> Void
     let onDelete: () -> Void
+    let onRevealInFinder: () -> Void
     let onPrimaryTap: () -> Void
     
     @State private var isHovered = false
@@ -296,6 +316,12 @@ struct WardrobeItemCard: View {
         let source = (item.sourceAppName ?? "Unknown").trimmingCharacters(in: .whitespacesAndNewlines)
         return source.isEmpty ? "Unknown App" : source
     }
+
+    /// A card is revealable when it came from a real file system location,
+    /// regardless of whether Wardrobe renders it as a file, image, or video.
+    private var hasFinderReference: Bool {
+        item.originalFilePath != nil || FileAccessStore.shared.resolve(for: item.id) != nil
+    }
     
     @ViewBuilder
     private var largeHeaderAppIcon: some View {
@@ -344,6 +370,13 @@ struct WardrobeItemCard: View {
         .onDrag {
             let provider = NSItemProvider(object: item.id.uuidString as NSString)
             return provider
+        }
+        .contextMenu {
+            if hasFinderReference {
+                Button(action: onRevealInFinder) {
+                    Label("Show in Finder", systemImage: "folder")
+                }
+            }
         }
     }
     
@@ -417,6 +450,12 @@ struct WardrobeItemCard: View {
         .frame(maxWidth: .infinity)
         .frame(height: 100)
         .clipShape(RoundedRectangle(cornerRadius: 16))
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            if hasFinderReference {
+                onRevealInFinder()
+            }
+        }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
     }

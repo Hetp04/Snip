@@ -6,11 +6,7 @@ final class FileAccessStore {
     private init() {}
     private var baseDir: URL {
         let appSup = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let dir = appSup.appendingPathComponent("hetpaste/Bookmarks", isDirectory: true)
-        if !fm.fileExists(atPath: dir.path) {
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-        return dir
+        return appSup.appendingPathComponent("hetpaste/Bookmarks", isDirectory: true)
     }
     private func bookmarkPath(for id: UUID) -> URL {
         baseDir.appendingPathComponent(id.uuidString).appendingPathExtension("bookmark")
@@ -18,14 +14,25 @@ final class FileAccessStore {
     private func pathFile(for id: UUID) -> URL {
         baseDir.appendingPathComponent(id.uuidString).appendingPathExtension("path")
     }
-    func save(url: URL, for id: UUID) {
-        try? url.path.write(to: pathFile(for: id), atomically: true, encoding: .utf8)
-        let options: URL.BookmarkCreationOptions = [.withSecurityScope]
-        if let data = try? url.bookmarkData(options: options, includingResourceValuesForKeys: nil, relativeTo: nil) {
-            try? data.write(to: bookmarkPath(for: id), options: .atomic)
-        } else if let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
-            try? data.write(to: bookmarkPath(for: id), options: .atomic)
+    func save(url: URL, for id: UUID) throws {
+        try fm.createDirectory(at: baseDir, withIntermediateDirectories: true)
+        try url.path.write(to: pathFile(for: id), atomically: true, encoding: .utf8)
+
+        let bookmarkData: Data
+        do {
+            bookmarkData = try url.bookmarkData(
+                options: [.withSecurityScope],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+        } catch {
+            bookmarkData = try url.bookmarkData(
+                options: [],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
         }
+        try bookmarkData.write(to: bookmarkPath(for: id), options: .atomic)
     }
     func resolve(for id: UUID) -> URL? {
         let path = bookmarkPath(for: id)
@@ -52,12 +59,14 @@ final class FileAccessStore {
         }
         return nil
     }
-    func revealInFinder(for id: UUID, fallback: URL?) {
+    @discardableResult
+    func revealInFinder(for id: UUID, fallback: URL?) -> Bool {
         withResolvedURL(for: id, fallback: fallback) { url in
             NSWorkspace.shared.activateFileViewerSelecting([url])
         }
     }
-    func openFile(for id: UUID, fallback: URL?) {
+    @discardableResult
+    func openFile(for id: UUID, fallback: URL?) -> Bool {
         withResolvedURL(for: id, fallback: fallback) { url in
             NSWorkspace.shared.open(url)
         }
@@ -68,8 +77,8 @@ final class FileAccessStore {
         guard fm.fileExists(atPath: url.path) else { return nil }
         return url
     }
-    private func withResolvedURL(for id: UUID, fallback: URL?, action: (URL) -> Void) {
-        guard let url = resolvedURL(for: id, fallback: fallback) else { return }
+    private func withResolvedURL(for id: UUID, fallback: URL?, action: (URL) -> Void) -> Bool {
+        guard let url = resolvedURL(for: id, fallback: fallback) else { return false }
         var didStart = false
         if url.startAccessingSecurityScopedResource() { didStart = true }
         action(url)
@@ -78,6 +87,7 @@ final class FileAccessStore {
                 url.stopAccessingSecurityScopedResource()
             }
         }
+        return true
     }
     func remove(for id: UUID) {
         let path = bookmarkPath(for: id)

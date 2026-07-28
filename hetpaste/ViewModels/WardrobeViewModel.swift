@@ -26,7 +26,7 @@ final class WardrobeViewModel: ObservableObject {
         
         do {
             let fetchedItems = try await repository.fetchAll()
-            items = fetchedItems
+            items = fetchedItems.map(hydrateFileReference)
         } catch {
             loadError = "Failed to load wardrobe: \(error.localizedDescription)"
             print("❌ Wardrobe load error: \(error)")
@@ -38,6 +38,8 @@ final class WardrobeViewModel: ObservableObject {
     // MARK: - Add from External Drop
     
     func addFromDrop(providers: [NSItemProvider], sourceApp: NSRunningApplication? = nil) async {
+        // Finder provides one item provider per selected item. Process the full
+        // collection; Wardrobe intentionally has no one-file drop limit.
         for provider in providers {
             await addSingleItem(from: provider, source: .external, sourceApp: sourceApp)
         }
@@ -89,7 +91,23 @@ final class WardrobeViewModel: ObservableObject {
                     return
                 }
                 
-                guard error == nil, let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) else {
+                guard error == nil else {
+                    continuation.resume()
+                    return
+                }
+
+                let url: URL?
+                if let data = item as? Data {
+                    url = URL(dataRepresentation: data, relativeTo: nil)
+                } else if let fileURL = item as? URL {
+                    url = fileURL
+                } else if let fileURL = item as? NSURL {
+                    url = fileURL as URL
+                } else {
+                    url = nil
+                }
+
+                guard let url else {
                     continuation.resume()
                     return
                 }
@@ -468,6 +486,12 @@ final class WardrobeViewModel: ObservableObject {
             fileSize: clipboardItem.fileSize,
             mimeType: clipboardItem.mimeType
         )
+
+        // Internal drags get a new Wardrobe ID, so copy the source file reference
+        // to that new item instead of relying on the ClipboardItem's bookmark.
+        if let originalURL = clipboardItem.revealableFileURL {
+            item.originalFilePath = originalURL.path
+        }
         
         // If it has local data, use it
         if let localData = clipboardItem.localData {
@@ -492,10 +516,46 @@ final class WardrobeViewModel: ObservableObject {
     }
     
     // MARK: - Save & Delete
+
+    private func hydrateFileReference(_ item: WardrobeItem) -> WardrobeItem {
+        var hydratedItem = item
+        if let wardrobeURL = FileAccessStore.shared.resolvedURL(for: item.id, fallback: nil) {
+            hydratedItem.originalFilePath = wardrobeURL.path
+            return hydratedItem
+        }
+
+        // Migrate Wardrobe cards created from clipboard history before they had
+        // their own bookmark. The source snippet ID points at the original one.
+        if let sourceID = item.sourceSnippetID,
+           let sourceURL = FileAccessStore.shared.resolvedURL(for: sourceID, fallback: nil) {
+            if (try? FileAccessStore.shared.save(url: sourceURL, for: item.id)) != nil {
+                hydratedItem.originalFilePath = sourceURL.path
+            }
+        }
+        return hydratedItem
+    }
     
     private func saveItem(_ item: WardrobeItem) async throws {
-        let saved = try await repository.save(item)
-        items.insert(saved, at: 0)
+        var savedLocalReference = false
+        if let originalFilePath = item.originalFilePath {
+            // A Wardrobe file card is a reference. Do not create it if its local
+            // path and bookmark cannot be made durable across app restarts.
+            try FileAccessStore.shared.save(
+                url: URL(fileURLWithPath: originalFilePath),
+                for: item.id
+            )
+            savedLocalReference = true
+        }
+
+        do {
+            let saved = try await repository.save(item)
+            items.insert(saved, at: 0)
+        } catch {
+            if savedLocalReference {
+                FileAccessStore.shared.remove(for: item.id)
+            }
+            throw error
+        }
     }
     
     func deleteItem(_ item: WardrobeItem) {
@@ -503,10 +563,22 @@ final class WardrobeViewModel: ObservableObject {
             do {
                 try await repository.delete(id: item.id)
                 items.removeAll { $0.id == item.id }
+                FileAccessStore.shared.remove(for: item.id)
             } catch {
                 loadError = "Failed to delete: \(error.localizedDescription)"
             }
         }
+    }
+
+    // MARK: - Finder
+
+    func revealInFinder(_ item: WardrobeItem) -> (didReveal: Bool, message: String) {
+        let fallbackURL = item.originalFilePath.map(URL.init(fileURLWithPath:))
+        let didReveal = FileAccessStore.shared.revealInFinder(for: item.id, fallback: fallbackURL)
+        if didReveal {
+            return (true, "Shown in Finder")
+        }
+        return (false, "Can't find this file — it may have been moved or deleted")
     }
     
     // MARK: - Copy to Clipboard
