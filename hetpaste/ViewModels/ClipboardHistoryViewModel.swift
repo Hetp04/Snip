@@ -252,7 +252,10 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
     }
     func itemCount(in folder: ClipboardFolder) -> Int {
-        items.filter { $0.folderID == folder.id }.count
+        items.filter { $0.folderIDs.contains(folder.id) }.count
+    }
+    func items(in folderID: UUID) -> [ClipboardItem] {
+        items.filter { $0.folderIDs.contains(folderID) }
     }
     @discardableResult
     func createFolder(named name: String = "Untitled Folder") -> ClipboardFolder {
@@ -295,10 +298,10 @@ final class ClipboardHistoryViewModel: ObservableObject {
     }
     func deleteFolder(_ folder: ClipboardFolder) {
         let previousFolders = folders
-        let affectedItems = items.filter { $0.folderID == folder.id }.map { ($0.id, $0.folderID) }
+        let affectedItemIDs = items.filter { $0.folderIDs.contains(folder.id) }.map(\.id)
         folders.removeAll { $0.id == folder.id }
-        for item in items where item.folderID == folder.id {
-            updateItem(id: item.id) { $0.folderID = nil }
+        for itemID in affectedItemIDs {
+            updateItem(id: itemID) { $0.folderIDs.remove(folder.id) }
         }
         Task {
             do {
@@ -306,8 +309,8 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 loadError = nil
             } catch {
                 folders = previousFolders
-                for (itemID, folderID) in affectedItems {
-                    updateItem(id: itemID) { $0.folderID = folderID }
+                for itemID in affectedItemIDs {
+                    updateItem(id: itemID) { $0.folderIDs.insert(folder.id) }
                 }
                 loadError = folderErrorMessage(for: error, fallback: "Couldn't delete folder")
             }
@@ -316,33 +319,44 @@ final class ClipboardHistoryViewModel: ObservableObject {
     func assignItems(_ itemIDs: [UUID], to folder: ClipboardFolder) {
         let uniqueIDs = Array(Set(itemIDs))
         guard !uniqueIDs.isEmpty else { return }
-        let previousAssignments = Dictionary(uniqueKeysWithValues: uniqueIDs.compactMap { id in
-            items.first(where: { $0.id == id }).map { (id, $0.folderID) }
-        })
-        for id in uniqueIDs {
-            updateItem(id: id) { $0.folderID = folder.id }
+        
+        let itemsToMove = uniqueIDs.filter { id in
+            let itemFolders = items.first(where: { $0.id == id })?.folderIDs ?? []
+            return itemFolders != [folder.id]
         }
+        
+        guard !itemsToMove.isEmpty else { return }
+        
+        var previousFolderIDs: [UUID: Set<UUID>] = [:]
+        
+        for id in itemsToMove {
+            if let item = items.first(where: { $0.id == id }) {
+                previousFolderIDs[id] = item.folderIDs
+                updateItem(id: id) { $0.folderIDs = [folder.id] }
+            }
+        }
+        
         Task {
             do {
-                try await repository.setFolder(ids: uniqueIDs, folderID: folder.id)
+                try await repository.addToFolder(ids: itemsToMove, folderID: folder.id)
                 loadError = nil
             } catch {
-                for (itemID, oldFolderID) in previousAssignments {
-                    updateItem(id: itemID) { $0.folderID = oldFolderID }
+                for (itemID, oldFolders) in previousFolderIDs {
+                    updateItem(id: itemID) { $0.folderIDs = oldFolders }
                 }
                 loadError = folderErrorMessage(for: error, fallback: "Couldn't move item to folder")
             }
         }
     }
-    func removeFromFolder(_ item: ClipboardItem) {
-        let previousFolderID = item.folderID
-        updateItem(id: item.id) { $0.folderID = nil }
+    func removeFromFolder(_ item: ClipboardItem, folderID: UUID) {
+        guard item.folderIDs.contains(folderID) else { return }
+        updateItem(id: item.id) { $0.folderIDs.remove(folderID) }
         Task {
             do {
-                try await repository.setFolder(id: item.id, folderID: nil)
+                try await repository.removeFromFolder(id: item.id, folderID: folderID)
                 loadError = nil
             } catch {
-                updateItem(id: item.id) { $0.folderID = previousFolderID }
+                updateItem(id: item.id) { $0.folderIDs.insert(folderID) }
                 loadError = folderErrorMessage(for: error, fallback: "Couldn't remove item from folder")
             }
         }
@@ -475,27 +489,50 @@ final class ClipboardHistoryViewModel: ObservableObject {
         return NSItemProvider(object: (item.contentText ?? item.fileName ?? "") as NSString)
     }
     func folderDragItemProvider(for itemIDs: [UUID]) -> NSItemProvider {
-        let payload = itemIDs.map(\.uuidString).joined(separator: ",")
-        let provider: NSItemProvider
-        if itemIDs.count == 1, let item = items.first(where: { $0.id == itemIDs[0] }) {
-            provider = dragItemProvider(for: item)
-        } else {
-            let fallbackText = items.filter { itemIDs.contains($0.id) }
-                .compactMap { plainTextFallback(for: $0) }
-                .joined(separator: "\n")
-            provider = NSItemProvider(object: fallbackText as NSString)
-        }
-        provider.registerDataRepresentation(forTypeIdentifier: UTType.hetpasteFolderItemIDs.identifier, visibility: .all) { completion in
+        let uniqueIDs = Array(Set(itemIDs))
+        let payload = uniqueIDs.map(\.uuidString).joined(separator: ",")
+        let provider = NSItemProvider()
+
+        // Primary: internal folder-filing type.
+        // Uses registerDataRepresentation — the same pattern as the working wardrobe type.
+        provider.registerDataRepresentation(
+            forTypeIdentifier: UTType.hetpasteFolderItemIDs.identifier,
+            visibility: .all
+        ) { completion in
             completion(payload.data(using: .utf8), nil)
             return nil
         }
-        // Also register for wardrobe drops
-        if itemIDs.count == 1, let itemID = itemIDs.first {
-            provider.registerDataRepresentation(forTypeIdentifier: UTType.hetpasteWardrobeItemID.identifier, visibility: .all) { completion in
-                completion(itemID.uuidString.data(using: .utf8), nil)
+
+        // Secondary: external drag fallbacks so the card can still be dropped into
+        // other apps (Finder, Notes, etc.) or onto the Wardrobe.
+        if uniqueIDs.count == 1, let item = items.first(where: { $0.id == uniqueIDs[0] }) {
+            if let url = item.revealableFileURL,
+               item.contentType == .file || item.contentType == .video || item.contentType == .image {
+                provider.registerObject(url as NSURL, visibility: .all)
+            } else if let text = plainTextFallback(for: item) {
+                provider.registerObject(text as NSString, visibility: .all)
+            }
+            if item.contentType == .image, let data = item.localData {
+                provider.registerDataRepresentation(forTypeIdentifier: UTType.png.identifier, visibility: .all) { completion in
+                    completion(data, nil)
+                    return nil
+                }
+            }
+            // Wardrobe internal shortcut.
+            provider.registerDataRepresentation(
+                forTypeIdentifier: UTType.hetpasteWardrobeItemID.identifier,
+                visibility: .all
+            ) { completion in
+                completion(item.id.uuidString.data(using: .utf8), nil)
                 return nil
             }
+        } else {
+            let fallbackText = items.filter { uniqueIDs.contains($0.id) }
+                .compactMap { plainTextFallback(for: $0) }
+                .joined(separator: "\n")
+            provider.registerObject(fallbackText as NSString, visibility: .all)
         }
+
         return provider
     }
     private func writeRichText(_ item: ClipboardItem, to pasteboard: NSPasteboard) -> Bool {

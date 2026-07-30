@@ -4,6 +4,7 @@ final class ClipboardRepository {
     private var client: SupabaseClient { SupabaseManager.shared.client }
     private let table = AppConstants.clipboardTable
     private let foldersTable = AppConstants.foldersTable
+    private let snippetFoldersTable = AppConstants.snippetFoldersTable
     func fetchAll(limit: Int = 200) async throws -> [ClipboardItem] {
         let records: [ClipboardRecord] = try await client
             .from(table)
@@ -12,7 +13,20 @@ final class ClipboardRepository {
             .limit(limit)
             .execute()
             .value
-        return records.map(ClipboardItem.init(record:))
+        var items = records.map(ClipboardItem.init(record:))
+        let associations: [SnippetFolderRecord] = try await client
+            .from(snippetFoldersTable)
+            .select("snippet_id,folder_id")
+            .execute()
+            .value
+        let memberships = Dictionary(grouping: associations) { $0.snippet_id.uppercased() }
+        for index in items.indices {
+            items[index].folderIDs.formUnion(
+                memberships[items[index].id.uuidString, default: []]
+                    .compactMap { UUID(uuidString: $0.folder_id) }
+            )
+        }
+        return items
     }
     func save(_ item: ClipboardItem) async throws -> ClipboardItem {
         var synced = item
@@ -44,24 +58,35 @@ final class ClipboardRepository {
             .eq("id", value: id.uuidString)
             .execute()
     }
-    func setFolder(id: UUID, folderID: UUID?) async throws {
-        try await client
-            .from(table)
-            .update(ClipboardItemFolderUpdate(folder_id: folderID?.uuidString))
-            .eq("id", value: id.uuidString)
-            .execute()
-    }
-    func setFolder(ids: [UUID], folderID: UUID?) async throws {
-        let uniqueIDs = Array(Set(ids))
-        guard !uniqueIDs.isEmpty else { return }
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            for id in uniqueIDs {
-                group.addTask { [self] in
-                    try await setFolder(id: id, folderID: folderID)
+    func addToFolder(ids: [UUID], folderID: UUID) async throws {
+        await withTaskGroup(of: Void.self) { group in
+            for id in ids {
+                group.addTask {
+                    try? await self.client
+                        .from(self.snippetFoldersTable)
+                        .delete()
+                        .eq("snippet_id", value: id.uuidString)
+                        .execute()
                 }
             }
-            try await group.waitForAll()
         }
+        
+        let records = Set(ids).map {
+            SnippetFolderInsertRecord(snippet_id: $0.uuidString, folder_id: folderID.uuidString)
+        }
+        guard !records.isEmpty else { return }
+        try await client
+            .from(snippetFoldersTable)
+            .upsert(records, onConflict: "snippet_id,folder_id")
+            .execute()
+    }
+    func removeFromFolder(id: UUID, folderID: UUID) async throws {
+        try await client
+            .from(snippetFoldersTable)
+            .delete()
+            .eq("snippet_id", value: id.uuidString)
+            .eq("folder_id", value: folderID.uuidString)
+            .execute()
     }
     func delete(id: UUID) async throws {
         try await client

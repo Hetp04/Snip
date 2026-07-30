@@ -14,7 +14,25 @@ final class QuickClipboardStripController: ObservableObject {
     @Published var toastMessage: String?
     @Published var isToastError: Bool = false
     @Published var previewItem: ClipboardItem?
+    @Published private(set) var isDraggingCard = false
+    @Published private(set) var draggingItemID: UUID?
     private var toastTask: Task<Void, Never>?
+    private var dragResetTask: Task<Void, Never>?
+    func beginCardDrag(itemID: UUID) {
+        dragResetTask?.cancel()
+        draggingItemID = itemID
+        isDraggingCard = true
+        dragResetTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            self?.isDraggingCard = false
+            self?.draggingItemID = nil
+        }
+    }
+    func endCardDrag() {
+        dragResetTask?.cancel()
+        isDraggingCard = false
+        draggingItemID = nil
+    }
     func syncFocus(itemCount: Int) {
         guard itemCount > 0 else {
             focusedIndex = 0
@@ -73,11 +91,13 @@ struct QuickClipboardStripView: View {
     private let cardWidth: CGFloat = 312
     @State private var folderDraft: String = ""
     @State private var folderEditor: StripFolderEditor?
+    @State private var targetedFolderID: UUID?
+    @State private var confirmedFolderID: UUID?
     @FocusState private var isFolderFieldFocused: Bool
     private var filteredItems: [ClipboardItem] {
         var result = viewModel.items
         if let folderID = controller.selectedFolderID {
-            result = result.filter { $0.folderID == folderID }
+            result = result.filter { $0.folderIDs.contains(folderID) }
         }
         if let type = controller.selectedContentType {
             result = result.filter { $0.contentType == type }
@@ -87,7 +107,9 @@ struct QuickClipboardStripView: View {
     private var availableContentTypes: [ContentType] {
         let base = controller.selectedFolderID == nil
             ? viewModel.items
-            : viewModel.items.filter { $0.folderID == controller.selectedFolderID }
+            : viewModel.items.filter { item in
+                controller.selectedFolderID.map(item.folderIDs.contains) ?? true
+            }
         return ContentType.allCases.filter { type in
             base.contains { $0.contentType == type }
         }
@@ -95,7 +117,9 @@ struct QuickClipboardStripView: View {
     private func itemCount(of type: ContentType) -> Int {
         let base = controller.selectedFolderID == nil
             ? viewModel.items
-            : viewModel.items.filter { $0.folderID == controller.selectedFolderID }
+            : viewModel.items.filter { item in
+                controller.selectedFolderID.map(item.folderIDs.contains) ?? true
+            }
         return base.filter { $0.contentType == type }.count
     }
     private var selectedFolder: ClipboardFolder? {
@@ -243,23 +267,26 @@ struct QuickClipboardStripView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(viewModel.folders) { folder in
-                            FolderChipWithDropTarget(
+                            folderChip(
                                 title: folder.name,
                                 count: viewModel.itemCount(in: folder),
                                 isSelected: controller.selectedFolderID == folder.id,
-                                folderID: folder.id,
+                                isDropTarget: targetedFolderID == folder.id,
+                                confirmsDrop: confirmedFolderID == folder.id,
                                 action: {
                                     controller.selectedFolderID = folder.id
                                     controller.hidePreview()
-                                },
-                                onDropItems: { itemIDs in
-                                    viewModel.assignItems(itemIDs, to: folder)
-                                    controller.showToast(
-                                        itemIDs.count == 1 ? "Added to \(folder.name)" : "\(itemIDs.count) items added to \(folder.name)",
-                                        isError: false
-                                    )
                                 }
                             )
+                            .onDrop(
+                                of: [UTType.hetpasteFolderItemIDs],
+                                isTargeted: Binding(
+                                    get: { targetedFolderID == folder.id },
+                                    set: { targetedFolderID = $0 ? folder.id : nil }
+                                )
+                            ) { providers in
+                                handleFolderDrop(providers: providers, into: folder)
+                            }
                             .contextMenu {
                                 Button("Rename Folder") {
                                     folderEditor = .renaming(folder.id)
@@ -425,8 +452,17 @@ struct QuickClipboardStripView: View {
             )
             .frame(width: cardWidth, height: 194)
             .contentShape(Rectangle())
+            .opacity(controller.draggingItemID == item.id ? 0.35 : 1)
+            .animation(.easeOut(duration: 0.18), value: controller.draggingItemID)
             .onDrag {
+                controller.beginCardDrag(itemID: item.id)
                 return viewModel.folderDragItemProvider(for: [item.id])
+            } preview: {
+                ClipboardItemRow(item: item, isSelected: false, stripMode: true)
+                    .frame(width: cardWidth, height: 194)
+                    .scaleEffect(0.5)
+                    .padding(18)
+                    .shadow(color: .black.opacity(0.28), radius: 14, y: 8)
             }
             .onAppear {
                 if item.contentType == .image {
@@ -500,34 +536,46 @@ struct QuickClipboardStripView: View {
                 .stroke(accent ? Theme.accent.opacity(0.3) : Theme.border.opacity(0.7), lineWidth: 0.5)
         )
     }
-    private func folderChip(title: String, count: Int, isSelected: Bool, action: @escaping () -> Void) -> some View {
-        FolderChipWithDropTarget(
-            title: title,
-            count: count,
-            isSelected: isSelected,
-            folderID: title == "All" ? nil : viewModel.folders.first(where: { $0.name == title })?.id,
-            action: action,
-            onDropItems: { itemIDs in
-                if title == "All" {
-                    // Remove from all folders
-                    for id in itemIDs {
-                        if let item = viewModel.items.first(where: { $0.id == id }) {
-                            viewModel.removeFromFolder(item)
-                        }
-                    }
-                    controller.showToast(
-                        itemIDs.count == 1 ? "Removed from folder" : "\(itemIDs.count) items removed from folders",
-                        isError: false
-                    )
-                } else if let folder = viewModel.folders.first(where: { $0.name == title }) {
-                    viewModel.assignItems(itemIDs, to: folder)
-                    controller.showToast(
-                        itemIDs.count == 1 ? "Added to \(folder.name)" : "\(itemIDs.count) items added to \(folder.name)",
-                        isError: false
-                    )
-                }
+    private func folderChip(
+        title: String,
+        count: Int,
+        isSelected: Bool,
+        isDropTarget: Bool = false,
+        confirmsDrop: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 7) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+                .foregroundColor(isSelected ? .white : Theme.textPrimary)
+            if title != "All" {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(isSelected ? .white : Theme.textSecondary)
             }
+            Text("\(count)")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(isSelected ? .white.opacity(0.9) : Theme.textSecondary)
+                .scaleEffect(confirmsDrop ? 1.15 : 1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(minHeight: 32)
+        .background(
+            Capsule()
+                .fill(isSelected || confirmsDrop ? Theme.accent : (isDropTarget ? Theme.accent.opacity(0.16) : Theme.card))
         )
+        .overlay(
+            Capsule()
+                .stroke(isSelected || isDropTarget || confirmsDrop ? Theme.accent : Theme.border, lineWidth: isDropTarget ? 1.5 : 0.75)
+        )
+        .scaleEffect(isDropTarget ? 1.08 : 1)
+        .animation(.spring(response: 0.18, dampingFraction: 0.75), value: isDropTarget)
+        .animation(.spring(response: 0.22, dampingFraction: 0.7), value: confirmsDrop)
+        .contentShape(Capsule())
+        .padding(.vertical, 3)
+        .onTapGesture(perform: action)
     }
     @ViewBuilder
     private var typeFilterDropdown: some View {
@@ -701,56 +749,37 @@ struct QuickClipboardStripView: View {
         folderDraft = ""
     }
     private func handleFolderDrop(providers: [NSItemProvider], into folder: ClipboardFolder?) -> Bool {
-        guard let provider = providers.first else { return false }
+        // Prefer internal payload when available.
+        let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.hetpasteFolderItemIDs.identifier) })
+            ?? providers.first
+        guard let provider else { return false }
         loadClipboardItemIDs(from: provider) { ids in
             guard !ids.isEmpty else { return }
             if let folder {
-                viewModel.assignItems(ids, to: folder)
-                controller.showToast(
-                    ids.count == 1 ? "Added to \(folder.name)" : "\(ids.count) items added to \(folder.name)",
-                    isError: false
-                )
-            } else {
-                for id in ids {
-                    if let item = viewModel.items.first(where: { $0.id == id }) {
-                        viewModel.removeFromFolder(item)
-                    }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    confirmedFolderID = folder.id
                 }
-                controller.showToast(
-                    ids.count == 1 ? "Removed from folder" : "\(ids.count) items removed from folders",
-                    isError: false
-                )
+                viewModel.assignItems(ids, to: folder)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.7)) {
+                        confirmedFolderID = nil
+                    }
+                    controller.endCardDrag()
+                }
             }
         }
+        targetedFolderID = nil
         return true
     }
     private func loadClipboardItemIDs(from provider: NSItemProvider, onLoad: @escaping ([UUID]) -> Void) {
-        let identifiers = [
-            UTType.hetpasteFolderItemIDs.identifier,
-            UTType.utf8PlainText.identifier,
-            UTType.text.identifier
-        ]
-        guard let identifier = identifiers.first(where: { provider.hasItemConformingToTypeIdentifier($0) }) else {
-            return
-        }
-        provider.loadItem(forTypeIdentifier: identifier, options: nil) { item, _ in
-            let raw: String?
-            if let data = item as? Data {
-                raw = String(data: data, encoding: .utf8)
-            } else if let string = item as? String {
-                raw = string
-            } else if let string = item as? NSString {
-                raw = string as String
-            } else {
-                raw = nil
-            }
-            let ids = (raw ?? "")
-                .split(separator: ",")
-                .compactMap { UUID(uuidString: String($0)) }
+        guard provider.hasItemConformingToTypeIdentifier(UTType.hetpasteFolderItemIDs.identifier) else { return }
+        provider.loadDataRepresentation(forTypeIdentifier: UTType.hetpasteFolderItemIDs.identifier) { data, _ in
+            guard let data,
+                  let raw = String(data: data, encoding: .utf8),
+                  !raw.isEmpty else { return }
+            let ids = raw.split(separator: ",").compactMap { UUID(uuidString: String($0)) }
             guard !ids.isEmpty else { return }
-            DispatchQueue.main.async {
-                onLoad(ids)
-            }
+            DispatchQueue.main.async { onLoad(ids) }
         }
     }
     @ViewBuilder
@@ -1086,138 +1115,6 @@ struct PsychoCopyQueuePopover: View {
         case .image: return "photo"
         case .video: return "play.rectangle"
         case .text: return "text.alignleft"
-        }
-    }
-}
-
-// MARK: - Folder Chip with Drop Target
-struct FolderChipWithDropTarget: View {
-    let title: String
-    let count: Int
-    let isSelected: Bool
-    let folderID: UUID?
-    let action: () -> Void
-    let onDropItems: ([UUID]) -> Void
-    
-    @State private var isTargeted: Bool = false
-    @State private var dropScale: CGFloat = 1.0
-    @State private var dropAnimating: Bool = false
-    
-    var body: some View {
-        HStack(spacing: 7) {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .lineLimit(1)
-                .foregroundColor(textColor)
-            Text("\(count)")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(badgeColor)
-                .scaleEffect(dropAnimating ? 1.15 : 1.0)
-                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: dropAnimating)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .frame(minHeight: 32)
-        .background(
-            Capsule()
-                .fill(backgroundColor)
-                .overlay(
-                    Capsule()
-                        .stroke(borderColor, lineWidth: borderWidth)
-                )
-        )
-        .scaleEffect(isTargeted ? 1.08 : 1.0)
-        .contentShape(Capsule())
-        .padding(.vertical, 3)
-        .onTapGesture(perform: action)
-        .onDrop(of: [UTType.hetpasteFolderItemIDs], isTargeted: $isTargeted) { providers in
-            handleDrop(providers: providers)
-        }
-        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isTargeted)
-    }
-    
-    private var textColor: Color {
-        if isTargeted {
-            return .white
-        }
-        return isSelected ? .white : Theme.textPrimary
-    }
-    
-    private var badgeColor: Color {
-        if isTargeted {
-            return .white.opacity(0.95)
-        }
-        return isSelected ? .white.opacity(0.9) : Theme.textSecondary
-    }
-    
-    private var backgroundColor: Color {
-        if isTargeted {
-            return Theme.accent
-        }
-        return isSelected ? Theme.accent : Theme.card
-    }
-    
-    private var borderColor: Color {
-        if isTargeted {
-            return Theme.accent.opacity(0.8)
-        }
-        return isSelected ? Theme.accent : Theme.border
-    }
-    
-    private var borderWidth: CGFloat {
-        isTargeted ? 1.5 : 0.75
-    }
-    
-    private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
-        
-        loadClipboardItemIDs(from: provider) { ids in
-            guard !ids.isEmpty else { return }
-            
-            // Animate the count badge bounce
-            withAnimation(.spring(response: 0.2, dampingFraction: 0.5)) {
-                dropAnimating = true
-            }
-            
-            onDropItems(ids)
-            
-            // Reset animation after brief delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                withAnimation {
-                    dropAnimating = false
-                }
-            }
-        }
-        return true
-    }
-    
-    private func loadClipboardItemIDs(from provider: NSItemProvider, onLoad: @escaping ([UUID]) -> Void) {
-        let identifiers = [
-            UTType.hetpasteFolderItemIDs.identifier,
-            UTType.utf8PlainText.identifier,
-            UTType.text.identifier
-        ]
-        guard let identifier = identifiers.first(where: { provider.hasItemConformingToTypeIdentifier($0) }) else {
-            return
-        }
-        provider.loadItem(forTypeIdentifier: identifier, options: nil) { item, _ in
-            let raw: String?
-            if let data = item as? Data {
-                raw = String(data: data, encoding: .utf8)
-            } else if let string = item as? String {
-                raw = string
-            } else if let string = item as? NSString {
-                raw = string as String
-            } else {
-                raw = nil
-            }
-            let ids = (raw ?? "")
-                .split(separator: ",")
-                .compactMap { UUID(uuidString: String($0)) }
-            guard !ids.isEmpty else { return }
-            DispatchQueue.main.async {
-                onLoad(ids)
-            }
         }
     }
 }

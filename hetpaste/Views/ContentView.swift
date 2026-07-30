@@ -372,6 +372,8 @@ struct ClipboardFeedView: View {
     @State private var showDatePicker: Bool = false
     @State private var selectedItemID: UUID? = nil
     @State private var selectedItemIDs: Set<UUID> = []
+    @State private var draggingItemIDs: Set<UUID> = []
+    @State private var absorbedItemIDs: Set<UUID> = []
     @State private var editingFolderID: UUID? = nil
     @State private var editingFolderName: String = ""
     @State private var folderToast: String?
@@ -396,7 +398,7 @@ struct ClipboardFeedView: View {
             result = result.filter { $0.isPinned }
         }
         if let selectedFolder {
-            result = result.filter { $0.folderID == selectedFolder.id }
+            result = result.filter { $0.folderIDs.contains(selectedFolder.id) }
         }
         if let app = preFilteredApp {
             result = result.filter { $0.sourceAppName.lowercased() == app.lowercased() }
@@ -665,10 +667,8 @@ struct ClipboardFeedView: View {
                             viewModel.deleteFolder(folder)
                         },
                         onDropItems: { itemIDs in
+                            draggingItemIDs = []   // successful drop — clear immediately
                             viewModel.assignItems(itemIDs, to: folder)
-                            folderToast = itemIDs.count == 1
-                                ? "Added to \(folder.name)"
-                                : "\(itemIDs.count) items added to \(folder.name)"
                         }
                     )
                 }
@@ -740,8 +740,8 @@ struct ClipboardFeedView: View {
                     },
                     onDelete: {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            if selectedFolder != nil {
-                                viewModel.removeFromFolder(item)
+                            if let selectedFolder {
+                                viewModel.removeFromFolder(item, folderID: selectedFolder.id)
                             } else {
                                 viewModel.deleteItem(item)
                             }
@@ -759,14 +759,17 @@ struct ClipboardFeedView: View {
                         ImageTextViewerWindowManager.shared.open(item: item, viewModel: viewModel)
                     } : nil
                 )
+                .opacity(draggingItemIDs.contains(item.id) ? 0.35 : 1)
+                .animation(.easeOut(duration: 0.16), value: draggingItemIDs)
                 .onDrag {
-                    // Select this item when drag starts
-                    if !selectedItemIDs.contains(item.id) {
-                        selectedItemIDs = [item.id]
-                    }
                     let ids = selectedItemIDs.contains(item.id) ? Array(selectedItemIDs) : [item.id]
-                    print("🔵 Starting drag for item: \(item.id), payload IDs: \(ids)")
+                    draggingItemIDs = Set(ids)
+                    // No explicit drag-end callback in SwiftUI onDrag — reset after
+                    // a generous timeout so it reappears if the drag is cancelled.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) { draggingItemIDs = [] }
                     return viewModel.folderDragItemProvider(for: ids)
+                } preview: {
+                    dragPreview(for: item)
                 }
             }
         }
@@ -777,6 +780,26 @@ struct ClipboardFeedView: View {
         }
     }
     
+    /// A deliberately smaller snapshot used as the cursor-following drag image,
+    /// distinct from the full-size card left behind in the grid.
+    @ViewBuilder
+    private func dragPreview(for item: ClipboardItem) -> some View {
+        ClipboardItemRow(
+            item: item,
+            isSelected: selectedItemID == item.id,
+            isMostRecent: item.id == mostRecentID,
+            onToggleFavorite: {},
+            onRetrySync: {},
+            onCopy: {},
+            onDelete: {},
+            onTrash: {},
+            onExpand: {}
+        )
+        .frame(width: 260)
+        .scaleEffect(0.5, anchor: .center)
+        .shadow(color: .black.opacity(0.24), radius: 18, y: 10)
+        .padding(28)
+    }
     private func toggleChainSelection(_ id: UUID, binding: Binding<[UUID]>) {
         var ids = binding.wrappedValue
         if let idx = ids.firstIndex(of: id) {
@@ -842,16 +865,15 @@ struct FolderCardView: View {
     let onCommitRename: () -> Void
     let onDelete: () -> Void
     let onDropItems: ([UUID]) -> Void
-    
     @State private var isTargeted: Bool = false
-    @State private var dropAnimating: Bool = false
+    @State private var confirmsDrop: Bool = false
+    @State private var countScale: CGFloat = 1
     @FocusState private var isNameFocused: Bool
-    
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: isTargeted ? "folder.fill.badge.plus" : "folder.fill")
+            Image(systemName: "folder.fill")
                 .font(.system(size: 18, weight: .medium))
-                .foregroundColor(isTargeted ? Theme.accent : Color(hex: "#3A3A3C"))
+                .foregroundColor(Color(hex: "#3A3A3C"))
             if isEditing {
                 TextField("Folder name", text: $editingName)
                     .textFieldStyle(.plain)
@@ -862,18 +884,15 @@ struct FolderCardView: View {
             } else {
                 Text(folder.name)
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(isTargeted ? Theme.accent : Color(hex: "#1C1C1E"))
+                    .foregroundColor(Color(hex: "#1C1C1E"))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
             Spacer(minLength: 0)
-            if !isEditing {
-                Text("\(itemCount)")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(isTargeted ? Theme.accent : Theme.textSecondary)
-                    .scaleEffect(dropAnimating ? 1.2 : 1.0)
-                    .animation(.spring(response: 0.3, dampingFraction: 0.5), value: dropAnimating)
-            }
+            Text("\(itemCount)")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(Theme.textSecondary)
+                .scaleEffect(countScale)
             Button {
                 onBeginRename()
             } label: {
@@ -894,10 +913,10 @@ struct FolderCardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 14)
-                .fill(isTargeted ? Theme.accent.opacity(0.08) : Theme.selection)
+                .fill(Theme.selection)
                 .softInnerShadow(
                     RoundedRectangle(cornerRadius: 14),
-                    darkShadow: Color.black.opacity(isTargeted ? 0.3 : 0.15),
+                    darkShadow: Color.black.opacity(isTargeted ? 0.25 : 0.15),
                     lightShadow: Color.white.opacity(0.6),
                     spread: 0.05,
                     radius: 3
@@ -905,9 +924,10 @@ struct FolderCardView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .stroke(isTargeted ? Theme.accent : Color.clear, lineWidth: isTargeted ? 2 : 0)
+                .stroke(isTargeted || confirmsDrop ? Theme.accent : Color.clear, lineWidth: isTargeted || confirmsDrop ? 1.5 : 0)
         )
-        .scaleEffect(isTargeted ? 1.03 : 1.0)
+        .scaleEffect(isTargeted ? 1.08 : 1)
+        .animation(.spring(response: 0.18, dampingFraction: 0.75), value: isTargeted)
         .contentShape(Rectangle())
         .onTapGesture {
             if !isEditing {
@@ -918,63 +938,39 @@ struct FolderCardView: View {
             Button("Rename", action: onBeginRename)
             Button("Delete Folder", role: .destructive, action: onDelete)
         }
-        .onDrop(of: [UTType.hetpasteFolderItemIDs], isTargeted: $isTargeted) { providers in
-            guard let provider = providers.first else { return false }
-            loadClipboardItemIDs(from: provider)
-            return true
-        }
-        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isTargeted)
+
         .onAppear {
             if isEditing {
                 isNameFocused = true
             }
         }
+        .onDrop(of: [UTType.hetpasteFolderItemIDs], isTargeted: $isTargeted) { providers in
+            guard let provider = providers.first else { return false }
+            handleDrop(provider: provider)
+            return true
+        }
         .onChange(of: isEditing) { _, newValue in
             isNameFocused = newValue
         }
     }
-    private func loadClipboardItemIDs(from provider: NSItemProvider) {
-        print("🟢 FolderCardView: loadClipboardItemIDs called")
-        let identifiers = [UTType.hetpasteFolderItemIDs.identifier, UTType.utf8PlainText.identifier, UTType.text.identifier]
-        print("🟢 Looking for identifiers: \(identifiers)")
-        guard let identifier = identifiers.first(where: { provider.hasItemConformingToTypeIdentifier($0) }) else {
-            print("🔴 No matching identifier found in provider")
-            return
-        }
-        print("🟢 Found identifier: \(identifier)")
-        provider.loadItem(forTypeIdentifier: identifier, options: nil) { item, _ in
-            let raw: String?
-            if let data = item as? Data {
-                raw = String(data: data, encoding: .utf8)
-            } else if let string = item as? String {
-                raw = string
-            } else if let string = item as? NSString {
-                raw = string as String
-            } else {
-                raw = nil
-            }
-            print("🟢 Raw data: \(raw ?? "nil")")
-            let ids = (raw ?? "")
-                .split(separator: ",")
-                .compactMap { UUID(uuidString: String($0)) }
-            guard !ids.isEmpty else {
-                print("🔴 No valid UUIDs parsed")
-                return
-            }
-            print("🟢 Parsed \(ids.count) item IDs: \(ids)")
+    private func handleDrop(provider: NSItemProvider) {
+        guard provider.hasItemConformingToTypeIdentifier(UTType.hetpasteFolderItemIDs.identifier) else { return }
+        provider.loadDataRepresentation(forTypeIdentifier: UTType.hetpasteFolderItemIDs.identifier) { data, _ in
+            guard let data,
+                  let raw = String(data: data, encoding: .utf8),
+                  !raw.isEmpty else { return }
+            let ids = raw.split(separator: ",").compactMap { UUID(uuidString: String($0)) }
+            guard !ids.isEmpty else { return }
             DispatchQueue.main.async {
-                // Trigger drop animation
-                withAnimation(.spring(response: 0.2, dampingFraction: 0.5)) {
-                    self.dropAnimating = true
+                withAnimation(.easeOut(duration: 0.18)) {
+                    confirmsDrop = true
+                    countScale = 1.15
                 }
-                
-                print("🟢 Calling onDropItems with \(ids.count) items")
-                self.onDropItems(ids)
-                
-                // Reset animation
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    withAnimation {
-                        self.dropAnimating = false
+                onDropItems(ids)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.7)) {
+                        confirmsDrop = false
+                        countScale = 1
                     }
                 }
             }

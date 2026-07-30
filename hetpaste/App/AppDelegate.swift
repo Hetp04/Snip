@@ -37,7 +37,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var visibleStripItems: [ClipboardItem] {
         var result = viewModel.items
         if let folderID = stripController.selectedFolderID {
-            result = result.filter { $0.folderID == folderID }
+            result = result.filter { $0.folderIDs.contains(folderID) }
         }
         if let type = stripController.selectedContentType {
             result = result.filter { $0.contentType == type }
@@ -193,6 +193,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true, animate: false)
     }
     private func closeClipboardStrip() {
+        guard !stripController.isDraggingCard else { return }
         stripController.hidePreview()
         stripPanel?.orderOut(nil)
         removeEventMonitors()

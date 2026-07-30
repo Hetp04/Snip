@@ -18,8 +18,13 @@ struct ClipboardFolderInsertRecord: Codable {
 struct ClipboardFolderNameUpdate: Codable {
     let name: String
 }
-struct ClipboardItemFolderUpdate: Codable {
-    let folder_id: String?
+struct SnippetFolderRecord: Codable {
+    let snippet_id: String
+    let folder_id: String
+}
+struct SnippetFolderInsertRecord: Codable {
+    let snippet_id: String
+    let folder_id: String
 }
 extension ClipboardFolder {
     private static let isoFormatter: ISO8601DateFormatter = {

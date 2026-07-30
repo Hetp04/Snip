@@ -10,7 +10,8 @@ struct ClipboardItem: Identifiable {
     var contentText: String?            
     var sourceAppName: String
     var sourceAppBundleID: String?
-    var folderID: UUID? = nil
+    /// Additive folder associations loaded from `snippet_folders`.
+    var folderIDs: Set<UUID> = []
     var isPinned: Bool = false
     var createdAt: Date = Date()
     var syncStatus: SyncStatus = .synced
@@ -90,7 +91,7 @@ extension ClipboardItem {
             full_text: contentText,
             source_app_name: sourceAppName,
             source_bundle_id: sourceAppBundleID,
-            folder_id: folderID?.uuidString,
+            folder_id: nil,
             created_at: Self.isoFormatter.string(from: createdAt),
             is_favorite: isPinned,
             storage_path: storagePath,
@@ -110,7 +111,7 @@ extension ClipboardItem {
         self.contentText = record.full_text ?? record.preview_text
         self.sourceAppName = record.source_app_name
         self.sourceAppBundleID = record.source_bundle_id
-        self.folderID = record.folder_id.flatMap(UUID.init(uuidString:))
+        self.folderIDs = Set(record.folder_id.flatMap(UUID.init(uuidString:)).map { [$0] } ?? [])
         self.isPinned = record.is_favorite
         if let created = record.created_at {
             self.createdAt = ClipboardItem.isoFormatter.date(from: created)

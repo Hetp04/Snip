@@ -299,10 +299,6 @@ struct ClipboardItemRow: View {
         .onHover { hovering in
             isHovered = hovering
         }
-        .onDrag {
-            let provider = NSItemProvider(object: item.id.uuidString as NSString)
-            return provider
-        }
         .contextMenu {
             fileActionsContextMenu
         }
