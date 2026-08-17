@@ -7,11 +7,21 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		3392DA182FD1062D00F66EDF /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = 3392DA172FD1062D00F66EDF /* Supabase */; };
 		3392DA1C2FD1088600F66EDF /* Config.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 3392DA1B2FD1088600F66EDF /* Config.xcconfig */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		33355119303277F3003A2073 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 33AECBF82FD0CA50007AA64D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 33AECBFF2FD0CA50007AA64D;
+			remoteInfo = hetpaste;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		33355115303277F3003A2073 /* hetpasteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = hetpasteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3392DA1B2FD1088600F66EDF /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = "<group>"; };
 		33AECC002FD0CA50007AA64D /* hetpaste.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = hetpaste.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -27,6 +37,11 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		33355116303277F3003A2073 /* hetpasteTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = hetpasteTests;
+			sourceTree = "<group>";
+		};
 		33AECC022FD0CA50007AA64D /* hetpaste */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -38,11 +53,17 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		33355112303277F3003A2073 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		33AECBFD2FD0CA50007AA64D /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				3392DA182FD1062D00F66EDF /* Supabase in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -60,6 +81,7 @@
 			isa = PBXGroup;
 			children = (
 				33AECC022FD0CA50007AA64D /* hetpaste */,
+				33355116303277F3003A2073 /* hetpasteTests */,
 				3392DA162FD1062D00F66EDF /* Frameworks */,
 				33AECC012FD0CA50007AA64D /* Products */,
 				3392DA1B2FD1088600F66EDF /* Config.xcconfig */,
@@ -70,6 +92,7 @@
 			isa = PBXGroup;
 			children = (
 				33AECC002FD0CA50007AA64D /* hetpaste.app */,
+				33355115303277F3003A2073 /* hetpasteTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -77,6 +100,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		33355114303277F3003A2073 /* hetpasteTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3335511B303277F3003A2073 /* Build configuration list for PBXNativeTarget "hetpasteTests" */;
+			buildPhases = (
+				33355111303277F3003A2073 /* Sources */,
+				33355112303277F3003A2073 /* Frameworks */,
+				33355113303277F3003A2073 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3335511A303277F3003A2073 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				33355116303277F3003A2073 /* hetpasteTests */,
+			);
+			name = hetpasteTests;
+			packageProductDependencies = (
+			);
+			productName = hetpasteTests;
+			productReference = 33355115303277F3003A2073 /* hetpasteTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		33AECBFF2FD0CA50007AA64D /* hetpaste */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 33AECC0B2FD0CA52007AA64D /* Build configuration list for PBXNativeTarget "hetpaste" */;
@@ -94,7 +140,6 @@
 			);
 			name = hetpaste;
 			packageProductDependencies = (
-				3392DA172FD1062D00F66EDF /* Supabase */,
 			);
 			productName = hetpaste;
 			productReference = 33AECC002FD0CA50007AA64D /* hetpaste.app */;
@@ -110,8 +155,17 @@
 				LastSwiftUpdateCheck = 2630;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
+					33355114303277F3003A2073 = {
+						CreatedOnToolsVersion = 26.3;
+						TestTargetID = 33AECBFF2FD0CA50007AA64D;
+					};
 					33AECBFF2FD0CA50007AA64D = {
 						CreatedOnToolsVersion = 26.3;
+						SystemCapabilities = {
+							com.apple.iCloud = {
+								enabled = 1;
+							};
+						};
 					};
 				};
 			};
@@ -125,7 +179,6 @@
 			mainGroup = 33AECBF72FD0CA50007AA64D;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				33AECC382FD0CAEA007AA64D /* XCRemoteSwiftPackageReference "supabase-swift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 33AECC012FD0CA50007AA64D /* Products */;
@@ -133,11 +186,19 @@
 			projectRoot = "";
 			targets = (
 				33AECBFF2FD0CA50007AA64D /* hetpaste */,
+				33355114303277F3003A2073 /* hetpasteTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		33355113303277F3003A2073 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		33AECBFE2FD0CA50007AA64D /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -149,6 +210,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		33355111303277F3003A2073 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		33AECBFC2FD0CA50007AA64D /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -158,7 +226,55 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		3335511A303277F3003A2073 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 33AECBFF2FD0CA50007AA64D /* hetpaste */;
+			targetProxy = 33355119303277F3003A2073 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		3335511C303277F3003A2073 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K3P52MFF3S;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Her.hetpasteTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hetpaste.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/hetpaste";
+			};
+			name = Debug;
+		};
+		3335511D303277F3003A2073 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K3P52MFF3S;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Her.hetpasteTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hetpaste.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/hetpaste";
+			};
+			name = Release;
+		};
 		33AECC092FD0CA52007AA64D /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -302,6 +418,10 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lsqlite3",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = Her.hetpaste;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -337,6 +457,10 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lsqlite3",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = Her.hetpaste;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -352,6 +476,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		3335511B303277F3003A2073 /* Build configuration list for PBXNativeTarget "hetpasteTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3335511C303277F3003A2073 /* Debug */,
+				3335511D303277F3003A2073 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		33AECBFB2FD0CA50007AA64D /* Build configuration list for PBXProject "hetpaste" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -371,25 +504,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		33AECC382FD0CAEA007AA64D /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/supabase-community/supabase-swift.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.5.1;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		3392DA172FD1062D00F66EDF /* Supabase */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 33AECC382FD0CAEA007AA64D /* XCRemoteSwiftPackageReference "supabase-swift" */;
-			productName = Supabase;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 33AECBF82FD0CA50007AA64D /* Project object */;
 }

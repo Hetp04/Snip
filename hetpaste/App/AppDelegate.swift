@@ -34,6 +34,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var isProcessingMenuBarDrop = false
     private var originalButtonImage: NSImage?
     private var feedbackTimer: Timer?
+    private let hotkeyManager = HotkeyManager.shared
     private var visibleStripItems: [ClipboardItem] {
         var result = viewModel.items
         if let folderID = stripController.selectedFolderID {
@@ -45,6 +46,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return result
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !RuntimeEnvironment.isRunningUnitTests else { return }
+        // SwiftUI otherwise supplies the app name as the main window title.
+        // Keep the title bar beside the traffic lights intentionally blank.
+        DispatchQueue.main.async {
+            NSApp.windows
+                .filter { !($0 is NSPanel) }
+                .forEach {
+                    $0.title = ""
+                    $0.titleVisibility = .hidden
+                }
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "hetpaste")
@@ -83,6 +95,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             self?.stripController.showToast("Secure field — press ⌘V manually", isError: false)
         }
+        let searchCombo = viewModel.psychoCopyManager.settings.searchHotkey
+        hotkeyManager.registerSearchHotkey(searchCombo) { [weak self] in
+            self?.openMainAppFocusedOnSearch()
+        }
+        NotificationCenter.default.addObserver(
+            forName: PsychoCopyManager.searchHotkeyChangedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let combo = notification.object as? KeyCombination else { return }
+            self?.hotkeyManager.registerSearchHotkey(combo) {
+                self?.openMainAppFocusedOnSearch()
+            }
+        }
+        NSApplication.shared.registerForRemoteNotifications()
     }
     
     private func setupMenuBarDropTarget(button: NSButton) {
@@ -112,6 +139,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             popover.animates = true
             let popoverView = MenuBarPopoverView(
                 manager: viewModel.psychoCopyManager,
+                viewModel: viewModel,
                 onOpenSettings: { [weak self] in
                     self?.statusPopover?.performClose(nil)
                     self?.openMainApp()
@@ -263,18 +291,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             break
         }
     }
+    func openMainAppFocusedOnSearch() {
+        openMainApp()
+        NotificationCenter.default.post(name: .focusClipboardSearch, object: nil)
+    }
     private func installEventMonitors() {
         removeEventMonitors()
-        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .leftMouseUp, .rightMouseUp]) { [weak self] event in
             guard let self else { return event }
+            if event.type == .leftMouseUp || event.type == .rightMouseUp {
+                self.stripController.endCardDrag()
+                return event
+            }
             if event.window !== self.stripPanel, event.type == .leftMouseDown || event.type == .rightMouseDown {
                 self.closeClipboardStrip()
             }
             return event
         }
-        globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+        globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .leftMouseUp, .rightMouseUp]) { [weak self] event in
             Task { @MainActor in
-                self?.closeClipboardStrip()
+                guard let self else { return }
+                if event.type == .leftMouseUp || event.type == .rightMouseUp {
+                    self.stripController.endCardDrag()
+                } else {
+                    self.closeClipboardStrip()
+                }
             }
         }
     }
@@ -292,10 +333,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         closeClipboardStrip()
     }
     func applicationWillTerminate(_ notification: Notification) {
+        viewModel.persistLibraryCache(immediately: true)
         removeEventMonitors()
         if let psychoCopyModeObserver {
             NotificationCenter.default.removeObserver(psychoCopyModeObserver)
         }
+    }
+    func application(_ application: NSApplication, didReceiveRemoteNotification userInfo: [String: Any]) {
+        // CloudKit notifications are hints only; reload through the normal
+        // merge path so coalesced notifications never lose library changes.
+        viewModel.handleRemoteCloudChange()
     }
     private func updateStatusBarIcon() {
         let isActive = viewModel.psychoCopyManager.isMultiCopyModeActive

@@ -1,4 +1,5 @@
 import AppKit
+import CloudKit
 import Combine
 import Foundation
 import UniformTypeIdentifiers
@@ -9,6 +10,17 @@ extension UTType {
 struct ClipboardRestoreResult {
     let didCopy: Bool
     let message: String
+}
+enum CloudSyncState: Equatable {
+    case idle, syncing, offline, failed(String)
+    var title: String {
+        switch self {
+        case .idle: return "iCloud synced"
+        case .syncing: return "Syncing with iCloud…"
+        case .offline: return "Offline — changes will retry"
+        case .failed: return "iCloud needs attention"
+        }
+    }
 }
 @MainActor
 final class ClipboardHistoryViewModel: ObservableObject {
@@ -22,13 +34,40 @@ final class ClipboardHistoryViewModel: ObservableObject {
     @Published var loadError: String?
     @Published var focusedItemID: UUID?
     @Published var expandedItemID: UUID?
+    @Published private(set) var semanticSearchResults: [ClipboardItem] = []
+    @Published private(set) var isSearching = false
+    @Published var searchError: String?
+    @Published private(set) var cloudSyncState: CloudSyncState = .syncing
+    @Published private(set) var cloudDiagnostics = CloudSyncDiagnostics.shared
+    @Published private(set) var assetLoadingIDs: Set<UUID> = []
+    @Published private(set) var assetLoadErrors: [UUID: String] = [:]
+    @Published private(set) var isClipboardCapturePaused = false
+    @Published private(set) var isDeletingClipboardHistory = false
+    @Published private(set) var clipboardHistoryDeletionProgress = 0
     @Published var psychoCopyManager: PsychoCopyManager
-    private let service = ClipboardService()
-    private let repository = ClipboardRepository()
+    // Keep CloudKit construction lazy. XCTest launches the app as the test
+    // host before the test bundle is connected, and unsigned test hosts must
+    // never attempt to create a CloudKit container.
+    private lazy var service = ClipboardService()
+    private lazy var repository = ClipboardRepository()
     private var pendingFolderIDs: Set<UUID> = []
+    private var pendingItemIDs: Set<UUID> = []
+    private var searchTask: Task<Void, Never>?
+    private var activeSearchID = UUID()
+    private var pendingDeletionIDs: Set<UUID> = []
+    private var pendingFolderDeletionIDs: Set<UUID> = []
+    private var pendingChainIDs: Set<UUID> = []
+    private var pendingChainDeletionIDs: Set<UUID> = []
+    private var retryTask: Task<Void, Never>?
+    private var metadataPersistenceTask: Task<Void, Never>?
+    private var clipboardCaptureStateCancellable: AnyCancellable?
+    private let retryNotBeforeKey = "cloudkit.retry-not-before"
+    private let initialPageSize = 80
+    @Published private(set) var hasMoreCachedItems = false
+    @Published private(set) var isLoadingMoreItems = false
     init() {
         self.psychoCopyManager = PsychoCopyManager()
-        if ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" {
+        if RuntimeEnvironment.isRunningUnitTests || ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" {
             return
         }
         psychoCopyManager.onGlobalPasteRequested = { [weak self] in
@@ -50,36 +89,208 @@ final class ClipboardHistoryViewModel: ObservableObject {
         service.onNewItem = { [weak self] item in
             Task { @MainActor in self?.handleNewItem(item) }
         }
+        NetworkReachability.shared.start()
+        NotificationCenter.default.addObserver(
+            forName: .hetpasteNetworkBecameAvailable,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, !self.isLoading else { return }
+            // CloudKit's explicit Retry-After window is still respected by
+            // loadHistory; this only retries immediately for ordinary loss of
+            // connectivity when the path comes back.
+            Task { await self.loadHistory() }
+        }
+        isClipboardCapturePaused = service.isCapturePaused
+        clipboardCaptureStateCancellable = service.$isCapturePaused
+            .receive(on: RunLoop.main)
+            .sink { [weak self] isPaused in
+                self?.isClipboardCapturePaused = isPaused
+            }
         service.start()
         Task { await loadHistory() }
     }
-    func loadHistory() async {
-        isLoading = true
-        loadError = nil
+
+    func toggleClipboardCapturePaused() {
+        service.toggleCapturePaused()
+    }
+
+    func clipboardHistoryCount(in range: ClipboardHistoryRange) -> Int {
+        LibraryMetadataStore.shared.historyItemCount(in: range)
+    }
+
+    func deleteClipboardHistory(in range: ClipboardHistoryRange) async throws -> Int {
+        guard !isDeletingClipboardHistory else { return 0 }
+        isDeletingClipboardHistory = true
+        clipboardHistoryDeletionProgress = 0
+        defer { isDeletingClipboardHistory = false }
+
+        let localMatches = LibraryMetadataStore.shared.historyItemIDs(in: range)
         do {
-            async let loadedItems = repository.fetchAll()
-            async let loadedFolders = repository.fetchFolders()
-            async let loadedChainsTask: () = loadChains()
-            var loaded = try await loadedItems
-            for i in 0..<loaded.count {
-                if loaded[i].contentType == .file || loaded[i].contentType == .image || loaded[i].contentType == .video {
-                    if loaded[i].originalFileURL == nil, let url = FileAccessStore.shared.resolve(for: loaded[i].id) {
-                        loaded[i].originalFileURL = url
-                    }
-                    if let url = loaded[i].originalFileURL, IconCache.shared.cachedFileIcon(forItemId: loaded[i].id) == nil {
-                        let icon = IconCache.shared.fileIcon(for: url)
-                        IconCache.shared.saveFileIcon(icon, forItemId: loaded[i].id)
-                    }
+            _ = try await repository.deleteHistory(in: range) { [weak self] count in
+                Task { @MainActor [weak self] in
+                    self?.clipboardHistoryDeletionProgress = count
                 }
             }
-            items = loaded
-            let remoteFolders = try await loadedFolders
-            folders = mergeFolders(remoteFolders)
-            _ = await loadedChainsTask
+            removePermanentlyDeletedHistoryItems(localMatches)
+            loadError = nil
+            return localMatches.count
+        } catch let partial as ClipboardHistoryDeletionFailure {
+            // CloudKit non-atomic batches can partly succeed. Remove only the
+            // IDs confirmed deleted and leave every failed item available for
+            // a later retry instead of pretending the whole request worked.
+            removePermanentlyDeletedHistoryItems(partial.deletedItemIDs)
+            handleCloudFailure(partial.underlyingError)
+            throw partial
         } catch {
-            loadError = error.localizedDescription
+            handleCloudFailure(error)
+            throw error
         }
+    }
+
+    func clipboardHistoryDeletionMessage(for error: Error) -> String {
+        let underlying = (error as? ClipboardHistoryDeletionFailure)?.underlyingError ?? error
+        return specificCloudErrorMessage(underlying)
+            ?? "Clipboard history couldn’t be deleted from iCloud. Please try again when you’re connected."
+    }
+
+    private func removePermanentlyDeletedHistoryItems(_ ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        metadataPersistenceTask?.cancel()
+        items.removeAll { ids.contains($0.id) }
+        pendingItemIDs.subtract(ids)
+        pendingDeletionIDs.subtract(ids)
+        LibraryMetadataStore.shared.remove(items: ids)
+        for id in ids {
+            AssetCache.shared.remove(for: id)
+            FileAccessStore.shared.remove(for: id)
+        }
+        reloadVisibleLibraryPage()
+        persistLibraryCache(immediately: true)
+    }
+
+    func loadHistory() async {
+        let cached = LibraryMetadataStore.shared.loadInitial(itemLimit: initialPageSize)
+        items = cached.items
+        folders = cached.folders
+        chains = cached.chains
+        chainItems = cached.chainItems
+        pendingItemIDs = cached.queues.pendingItemIDs
+        pendingFolderIDs = cached.queues.pendingFolderIDs
+        pendingDeletionIDs = cached.queues.pendingDeletionIDs
+        pendingFolderDeletionIDs = cached.queues.pendingFolderDeletionIDs
+        pendingChainIDs = cached.queues.pendingChainIDs
+        pendingChainDeletionIDs = cached.queues.pendingChainDeletionIDs
+        hasMoreCachedItems = cached.hasMoreItems
+        hydrateVisibleFileReferences()
+        updateDiagnostics()
+        if let retryNotBefore = UserDefaults.standard.object(forKey: retryNotBeforeKey) as? Date,
+           retryNotBefore > Date() {
+            cloudSyncState = .offline
+            scheduleRetry(at: retryNotBefore)
+            return
+        }
+        isLoading = true
+        cloudSyncState = .syncing
+        loadError = nil
+        do {
+            if LibraryMetadataStore.shared.needsInitialRemoteBootstrap() {
+                // One small, sorted request gets the newest cards on screen
+                // immediately. The following token-based import fills history
+                // in batches without delaying that first useful view.
+                let recent = try await repository.fetchRecent(limit: initialPageSize)
+                LibraryMetadataStore.shared.upsert(items: recent)
+                LibraryMetadataStore.shared.markInitialRemoteBootstrapComplete()
+                reloadVisibleLibraryPage()
+            }
+            // CloudKit returns only records since the persisted zone token.
+            // On a new device it streams the initial zone in server batches;
+            // on every later launch it normally writes only a small delta.
+            _ = try await CloudKitManager.shared.consumeRemoteChanges(
+                onRecordsChanged: { LibraryMetadataStore.shared.applyRemoteRecords($0) },
+                onRecordsDeleted: { LibraryMetadataStore.shared.applyRemoteDeletions($0) },
+                onPageApplied: { [weak self] in
+                    // First-run imports can span months of data. Publish the
+                    // newest local page after every CloudKit batch instead of
+                    // making the user wait for the historical import to end.
+                    Task { @MainActor [weak self] in self?.reloadVisibleLibraryPage() }
+                }
+            )
+            refreshPendingQueuesFromStore()
+            reloadVisibleLibraryPage()
+            startEmbeddingBackfill()
+            persistLibraryCache()
+            await retryQueuedChanges()
+            // Resumable transfers retain their local source after a crash.
+            // Only states whose source is gone are safe to reclaim here.
+            await repository.cleanupAbandonedChunkTransfers()
+            CloudSyncDiagnostics.shared.recordSuccess()
+        } catch {
+            loadError = cloudErrorMessage(error)
+            cloudSyncState = isTransientCloudError(error) ? .offline : .failed(cloudErrorMessage(error))
+            handleCloudFailure(error)
+        }
+        if loadError == nil { cloudSyncState = .idle }
         isLoading = false
+    }
+
+    func syncNow() { Task { await loadHistory() } }
+
+    private func reloadVisibleLibraryPage() {
+        let local = LibraryMetadataStore.shared.loadInitial(itemLimit: initialPageSize)
+        let pendingVisibleItems = items.filter { pendingItemIDs.contains($0.id) }
+        var merged = Dictionary(uniqueKeysWithValues: local.items.map { ($0.id, $0) })
+        for item in pendingVisibleItems { merged[item.id] = item }
+        items = merged.values.sorted { $0.createdAt > $1.createdAt }
+        folders = mergeFolders(local.folders)
+        chains = local.chains
+        chainItems = local.chainItems
+        hasMoreCachedItems = local.hasMoreItems
+        hydrateVisibleFileReferences()
+    }
+
+    private func refreshPendingQueuesFromStore() {
+        let queues = LibraryMetadataStore.shared.loadInitial(itemLimit: 0).queues
+        pendingItemIDs = queues.pendingItemIDs
+        pendingFolderIDs = queues.pendingFolderIDs
+        pendingDeletionIDs = queues.pendingDeletionIDs
+        pendingFolderDeletionIDs = queues.pendingFolderDeletionIDs
+        pendingChainIDs = queues.pendingChainIDs
+        pendingChainDeletionIDs = queues.pendingChainDeletionIDs
+    }
+
+    /// Appends one bounded metadata page from the local index. CloudKit is not
+    /// contacted while scrolling, so months of history do not delay the grid.
+    func loadMoreItemsIfNeeded() {
+        guard hasMoreCachedItems, !isLoadingMoreItems else { return }
+        isLoadingMoreItems = true
+        let cursor = items.last?.createdAt
+        let cursorID = items.last?.id
+        let page = LibraryMetadataStore.shared.loadItems(olderThan: cursor, afterID: cursorID, limit: initialPageSize)
+        let known = Set(items.map(\.id))
+        let additions = page.filter { !known.contains($0.id) }
+        items.append(contentsOf: additions)
+        items.sort { $0.createdAt > $1.createdAt }
+        hydrateVisibleFileReferences()
+        hasMoreCachedItems = page.count == initialPageSize
+        isLoadingMoreItems = false
+    }
+
+    private func hydrateVisibleFileReferences() {
+        for index in items.indices where items[index].contentType == .file || items[index].contentType == .image || items[index].contentType == .video {
+            guard items[index].originalFileURL == nil,
+                  let url = FileAccessStore.shared.resolve(for: items[index].id)
+            else { continue }
+            items[index].originalFileURL = url
+            if IconCache.shared.cachedFileIcon(forItemId: items[index].id) == nil {
+                IconCache.shared.saveFileIcon(IconCache.shared.fileIcon(for: url), forItemId: items[index].id)
+            }
+        }
+    }
+    func handleRemoteCloudChange() {
+        Task {
+            await loadHistory()
+        }
     }
     
     private func loadChains() async {
@@ -104,8 +315,23 @@ final class ClipboardHistoryViewModel: ObservableObject {
             return
         }
         psychoCopyManager.handleClipboardChange(item)
+        if let data = item.localData {
+            // Never allow Clear Cache to delete the only copy of a card while
+            // it is still pending or failed. This applies to every media size,
+            // not merely chunked transfers.
+            AssetCache.shared.setProtected(true, for: item.id)
+            AssetCache.shared.store(data, for: item.id)
+            if item.contentType == .image { ThumbnailCache.shared.createAndStore(from: data, for: item.id) }
+        }
         items.insert(item, at: 0)
-        Task { await sync(item) }
+        // Persist the intent before starting I/O. If the process exits between
+        // capture and the CloudKit response, this card is retried on launch.
+        pendingItemIDs.insert(item.id)
+        persistLibraryCache()
+        Task(priority: item.localData?.count ?? 0 > 48 * 1024 * 1024 ? .utility : .userInitiated) { [weak self] in
+            guard let self, await self.sync(item) else { return }
+            self.indexInBackground(item)
+        }
         // Run OCR in background immediately after image capture
         if item.contentType == .image, item.localData != nil {
             updateItem(id: item.id) { $0.ocrStatus = .pending }
@@ -184,46 +410,540 @@ final class ClipboardHistoryViewModel: ObservableObject {
             }
         }
     }
-    private func sync(_ item: ClipboardItem) async {
+    @discardableResult
+    private func sync(_ item: ClipboardItem) async -> Bool {
         do {
-            let saved = try await repository.save(item)
-            updateItem(id: item.id) {
+            var uploadItem = item
+            // A binary card reloads as metadata after a relaunch. Its durable
+            // AssetCache source lets an interrupted chunk transfer resume.
+            if uploadItem.localData == nil, let cached = AssetCache.shared.data(for: item.id) {
+                uploadItem.localData = cached
+            }
+            let saved = try await repository.save(uploadItem)
+            updateItem(id: item.id, touchModifiedAt: false) {
                 $0.syncStatus = .synced
                 $0.storagePath = saved.storagePath
             }
+            AssetCache.shared.setProtected(false, for: item.id)
+            pendingItemIDs.remove(item.id)
+            persistLibraryCache()
+            return true
         } catch {
-            updateItem(id: item.id) { $0.syncStatus = .failed }
+            updateItem(id: item.id, touchModifiedAt: false) { $0.syncStatus = .failed }
+            pendingItemIDs.insert(item.id)
+            persistLibraryCache()
+            cloudSyncState = isTransientCloudError(error) ? .offline : .failed(error.localizedDescription)
+            print("❌ Clipboard iCloud save error: \(error.localizedDescription)")
+            return false
         }
     }
+
+    private func indexInBackground(_ item: ClipboardItem) {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.index(item)
+        }
+    }
+
+    private func index(_ item: ClipboardItem) async {
+        guard PrivacySettings.shared.allowsExternalAI else {
+            updateItem(id: item.id) { $0.embeddingStatus = "disabled" }
+            return
+        }
+        updateItem(id: item.id) { $0.embeddingStatus = "pending" }
+        do {
+            // Index literal content first. It makes exact identifiers searchable
+            // even while the richer contextual representation is still running.
+            let rawVector = try await EmbeddingService.shared.embedWithRetry(item.rawSearchableText)
+            try await repository.updateEmbeddings(id: item.id, rawVector: rawVector, memoryVector: nil, status: "pending")
+            updateItem(id: item.id) { $0.rawEmbedding = rawVector }
+            let sourceHash = await CardUnderstandingService.shared.sourceHash(for: item)
+            let context: String
+            if let cached = try await repository.cachedSearchContext(sourceHash: sourceHash) {
+                context = cached
+                #if DEBUG
+                print("[Clipboard Search] card understanding | reused cached context")
+                #endif
+            } else {
+                context = try await CardUnderstandingService.shared.understandWithRetry(item)
+            }
+            try await repository.updateSearchContext(id: item.id, context: context, sourceHash: sourceHash)
+            updateItem(id: item.id) { $0.searchContext = context; $0.contextSourceHash = sourceHash }
+            guard let currentItem = items.first(where: { $0.id == item.id }) else { return }
+            let vector = try await EmbeddingService.shared.embedWithRetry(currentItem.searchableText)
+            try await repository.updateEmbeddings(id: item.id, rawVector: rawVector, memoryVector: vector, status: "done")
+            updateItem(id: item.id) { $0.embedding = vector; $0.embeddingStatus = "done" }
+        } catch is CancellationError { return }
+        catch {
+            #if DEBUG
+            print("[Clipboard Search] indexing failed | id=\(item.id) | error=\(error.localizedDescription)")
+            #endif
+            // Preserve a successfully stored raw vector and retry temporary
+            // provider failures on the next backfill instead of abandoning it.
+            try? await repository.updateEmbeddingStatus(id: item.id, status: "pending")
+            updateItem(id: item.id) { $0.embeddingStatus = "pending" }
+        }
+    }
+
+    private func startEmbeddingBackfill() {
+        Task { [weak self] in
+            guard let self else { return }
+            guard PrivacySettings.shared.allowsExternalAI else { return }
+            guard let pending = try? await repository.fetchItemsNeedingEmbeddings() else { return }
+            // A complete history may contain thousands of cards. Keep a small,
+            // bounded number of AI requests in flight so indexing is useful
+            // without overwhelming the API or unexpectedly spiking spend.
+            await withTaskGroup(of: Void.self) { group in
+                var iterator = pending.makeIterator()
+                for _ in 0..<3 {
+                    guard let item = iterator.next() else { break }
+                    group.addTask { await self.index(item) }
+                }
+                while await group.next() != nil {
+                    guard !Task.isCancelled, let item = iterator.next() else { continue }
+                    group.addTask { await self.index(item) }
+                }
+            }
+        }
+    }
+
+    /// Debounced semantic search. Cancellation is an expected control-flow path.
+    func search(query: String) {
+        searchTask?.cancel()
+        let searchID = UUID()
+        activeSearchID = searchID
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        searchError = nil
+        if trimmed.isEmpty { isSearching = false; semanticSearchResults = []; return }
+        // Search results are set by a background SQLite read below. Clearing
+        // stale results prevents a previous query from being filtered/rendered
+        // while the user is entering the next one.
+        semanticSearchResults = []
+        isSearching = false
+        searchTask = Task { [weak self] in
+            do {
+                let literalResults = await Task.detached(priority: .userInitiated) {
+                    LibraryMetadataStore.shared.searchItems(matching: trimmed)
+                }.value
+                guard !Task.isCancelled, self?.activeSearchID == searchID else { return }
+                self?.semanticSearchResults = literalResults
+
+                guard PrivacySettings.shared.allowsExternalAI, self?.shouldRefineSearch(trimmed) == true else { return }
+                // Do not start expensive semantic work until the user has
+                // paused. New input cancels this task before any request is made.
+                try await Task.sleep(for: .milliseconds(550))
+                guard !Task.isCancelled, self?.activeSearchID == searchID else { return }
+                self?.isSearching = true
+                let intentAnalysis: SearchIntentAnalysis
+                do {
+                    intentAnalysis = try await SearchIntentService.shared.analyze(trimmed)
+                } catch {
+                    intentAnalysis = SearchIntentAnalysis(semanticQuery: trimmed, matchMode: "all_in_one", retrievalQueries: [trimmed], logic: "A result must match the complete request.", requiredConstraints: [], exclusions: [], relatedConcepts: [], searchPhrases: [])
+                    #if DEBUG
+                    print("[Clipboard Search] intent analysis unavailable; using original request. Error: \(error.localizedDescription)")
+                    #endif
+                }
+                let retrievalQueries = intentAnalysis.retrievalQueries.isEmpty ? [trimmed] : intentAnalysis.retrievalQueries
+                var queryVectors: [([Double], String)] = []
+                for retrievalQuery in retrievalQueries {
+                    // Planner prose dilutes embedding retrieval with generic
+                    // words such as "intent" and "constraint". Embed the
+                    // actual focused request instead.
+                    queryVectors.append((try await EmbeddingService.shared.embedWithRetry(retrievalQuery, interactive: true), retrievalQuery))
+                }
+                guard !Task.isCancelled else { return }
+                var mergedHits: [UUID: SemanticSearchHit] = [:]
+                for (vector, retrievalQuery) in queryVectors {
+                    let hits = try await self?.repository.hybridSearch(vector: vector, rawQuery: retrievalQuery, limit: 40) ?? []
+                    for hit in hits where hit.similarity > (mergedHits[hit.id]?.similarity ?? -.infinity) {
+                        mergedHits[hit.id] = hit
+                    }
+                }
+                let hits = mergedHits.values.sorted { $0.similarity > $1.similarity }
+                guard !Task.isCancelled else { return }
+                let candidates = await MainActor.run { [weak self] in
+                    self?.rerankSearchResults(query: trimmed, semanticHits: hits) ?? []
+                }
+                let rerankCandidates = candidates.map {
+                    SearchRerankCandidate(id: $0.id, rawContent: $0.rawSearchableText, derivedContext: $0.searchContext, sourceApp: $0.sourceAppName, createdAt: $0.createdAt)
+                }
+                let aiDecisions: [SearchRerankDecision]?
+                do {
+                    aiDecisions = try await SearchReranker.shared.rerank(query: "\(trimmed)\n\nInterpreted intent:\n\(intentAnalysis.retrievalText)", candidates: rerankCandidates)
+                    #if DEBUG
+                    print("[Clipboard Search] AI reranker selected \(aiDecisions?.count ?? 0) of \(rerankCandidates.count) candidates")
+                    for decision in aiDecisions ?? [] {
+                        print("[Clipboard Search] evidence | id=\(decision.id) confidence=\(String(format: "%.2f", decision.confidence)) \(decision.evidence.debugDescription)")
+                    }
+                    #endif
+                } catch {
+                    aiDecisions = nil
+                    #if DEBUG
+                    print("[Clipboard Search] AI reranker unavailable; using semantic fallback. Error: \(error.localizedDescription)")
+                    #endif
+                }
+                guard !Task.isCancelled else { return }
+                await MainActor.run { [weak self] in
+                    guard let self, self.activeSearchID == searchID else { return }
+                    let results = self.applyAIReranking(aiDecisions, to: candidates)
+                    self.logSearchDebug(query: trimmed, vectorDimensions: queryVectors.first?.0.count ?? 0, semanticHits: hits, finalResults: results)
+                    self.semanticSearchResults = results
+                    self.isSearching = false
+                }
+            } catch is CancellationError { /* typing cancelled the prior request; do nothing */ }
+            catch {
+                await MainActor.run { [weak self] in
+                    guard let self, self.activeSearchID == searchID else { return }
+                    #if DEBUG
+                    print("[Clipboard Search] FAILED | query=\(trimmed.debugDescription) | error=\(error.localizedDescription)")
+                    #endif
+                    self.isSearching = false
+                    self.searchError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    /// Single words and short fragments are best served by the local index.
+    /// Semantic retrieval is reserved for an actual natural-language request.
+    private func shouldRefineSearch(_ query: String) -> Bool {
+        let wordCount = query.split(whereSeparator: { !$0.isWhitespace }).count
+        return wordCount >= 3 || query.count >= 24
+    }
+
+    private struct SearchIntent {
+        let terms: [String]
+        let appNames: Set<String>
+        let contentTypes: Set<ContentType>
+        let dateRange: ClosedRange<Date>?
+    }
+
+    private func rerankSearchResults(query: String, semanticHits: [SemanticSearchHit]) -> [ClipboardItem] {
+        let intent = searchIntent(for: query)
+        var candidates: [UUID: ClipboardItem] = [:]
+        var scores: [UUID: Double] = [:]
+        let activeByID = Dictionary(uniqueKeysWithValues: activeItems.map { ($0.id, $0) })
+
+        for hit in semanticHits {
+            guard let item = activeByID[hit.id], isEligibleSearchResult(item, for: query, intent: intent) else { continue }
+            candidates[item.id] = item
+            scores[item.id, default: 0] += hit.similarity * 1_000
+        }
+
+        for item in activeItems {
+            guard isEligibleSearchResult(item, for: query, intent: intent) else { continue }
+            let haystack = item.searchableText.lowercased()
+            let hits = intent.terms.reduce(0) { total, term in total + (haystack.contains(term) ? 1 : 0) }
+            let appMatches = intent.appNames.contains(normalizedSearchText(item.sourceAppName))
+            let typeMatches = intent.contentTypes.contains(item.contentType)
+            let dateMatches = intent.dateRange?.contains(item.createdAt) ?? false
+            guard hits > 0 || appMatches || typeMatches || dateMatches else { continue }
+            candidates[item.id] = item
+            scores[item.id, default: 0] += Double(hits) * 80
+            if haystack.contains(query.lowercased()) {
+                scores[item.id, default: 0] += 120
+            }
+            if appMatches { scores[item.id, default: 0] += 180 }
+            if typeMatches { scores[item.id, default: 0] += 90 }
+            if dateMatches { scores[item.id, default: 0] += 90 }
+        }
+
+        for item in candidates.values {
+            if !intent.appNames.isEmpty && intent.appNames.contains(normalizedSearchText(item.sourceAppName)) {
+                scores[item.id, default: 0] += 120
+            }
+            if !intent.contentTypes.isEmpty && intent.contentTypes.contains(item.contentType) {
+                scores[item.id, default: 0] += 70
+            }
+            if let range = intent.dateRange, range.contains(item.createdAt) {
+                scores[item.id, default: 0] += 70
+            }
+        }
+
+        let sorted = candidates.values.sorted {
+            let left = scores[$0.id, default: 0]
+            let right = scores[$1.id, default: 0]
+            if left == right { return $0.createdAt > $1.createdAt }
+            return left > right
+        }
+
+        // Let the LLM inspect a broader but still bounded pool. Limiting this too
+        // early makes it impossible for it to rescue a good result that semantic
+        // similarity placed just outside the local keyword-biased top ten.
+        return Array(sorted.prefix(12))
+    }
+
+    private func applyAIReranking(_ decisions: [SearchRerankDecision]?, to candidates: [ClipboardItem]) -> [ClipboardItem] {
+        guard let decisions else {
+            // If the reranker is unavailable (for example, no provider credit),
+            // retain the safe, compact semantic fallback.
+            return Array(candidates.prefix(3))
+        }
+        let byID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
+        return decisions.compactMap { byID[$0.id] }
+    }
+
+    private func isEligibleSearchResult(_ item: ClipboardItem, for query: String, intent: SearchIntent) -> Bool {
+        let text = item.searchableText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedText = normalizedSearchText(text)
+        let normalizedQuery = normalizedSearchText(query)
+
+        // Captured developer logs and the query itself are not useful search results.
+        if text.contains("[Clipboard Search]") || normalizedText == normalizedQuery { return false }
+        // Images with no OCR/description cannot substantively answer a text search.
+        if item.contentType == .image && intent.contentTypes.isEmpty { return false }
+        return !text.isEmpty
+    }
+
+    /// Detailed search traces for validating semantic search and the local filters in Xcode's console.
+    private func logSearchDebug(query: String, vectorDimensions: Int, semanticHits: [SemanticSearchHit], finalResults: [ClipboardItem]) {
+        #if DEBUG
+        let intent = searchIntent(for: query)
+        let dateFormatter = ISO8601DateFormatter()
+        print("\n[Clipboard Search] ─────────────────────────────────────────")
+        print("[Clipboard Search] prompt: \(query.debugDescription)")
+        print("[Clipboard Search] embedding dimensions: \(vectorDimensions) | semantic candidates: \(semanticHits.count) | final results: \(finalResults.count)")
+        print("[Clipboard Search] parsed filters | terms=\(intent.terms) apps=\(Array(intent.appNames).sorted()) types=\(intent.contentTypes.map(\.rawValue).sorted()) dateRange=\(intent.dateRange.map { "\(dateFormatter.string(from: $0.lowerBound))...\(dateFormatter.string(from: $0.upperBound))" } ?? "none")")
+
+        print("[Clipboard Search] semantic RPC candidates:")
+        let activeByID = Dictionary(uniqueKeysWithValues: activeItems.map { ($0.id, $0) })
+        for (index, hit) in semanticHits.enumerated() {
+            guard let item = activeByID[hit.id] else { continue }
+            let preview = item.searchableText.replacingOccurrences(of: "\n", with: " ").prefix(180)
+            print("  #\(index + 1) similarity=\(String(format: "%.4f", hit.similarity)) id=\(item.id.uuidString) type=\(item.contentType.rawValue) app=\(item.sourceAppName.debugDescription) created=\(dateFormatter.string(from: item.createdAt)) text=\(String(preview).debugDescription)")
+        }
+
+        print("[Clipboard Search] final reranked results:")
+        for (index, item) in finalResults.enumerated() {
+            let haystack = item.searchableText.lowercased()
+            let matchedTerms = intent.terms.filter { haystack.contains($0) }
+            let appMatch = intent.appNames.contains(normalizedSearchText(item.sourceAppName))
+            let typeMatch = intent.contentTypes.contains(item.contentType)
+            let dateMatch = intent.dateRange?.contains(item.createdAt) ?? false
+            let preview = item.searchableText.replacingOccurrences(of: "\n", with: " ").prefix(180)
+            print("  #\(index + 1) id=\(item.id.uuidString) matchedTerms=\(matchedTerms) appMatch=\(appMatch) typeMatch=\(typeMatch) dateMatch=\(dateMatch) text=\(String(preview).debugDescription)")
+        }
+        print("[Clipboard Search] ─────────────────────────────────────────\n")
+        #endif
+    }
+
+    private func searchIntent(for query: String) -> SearchIntent {
+        let normalized = normalizedSearchText(query)
+        let words = normalized
+            .split(separator: " ")
+            .map(String.init)
+        let stopWords: Set<String> = [
+            "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "find",
+            "for", "from", "had", "has", "have", "i", "im", "in", "is", "it", "like",
+            "looking", "me", "my", "of", "on", "or", "please", "search", "searching",
+            "show", "some", "something", "that", "the", "thing", "this", "to", "was",
+            "with"
+        ]
+        let terms = words.filter { $0.count > 2 && !stopWords.contains($0) }
+        let apps = Set(activeItems.map { normalizedSearchText($0.sourceAppName) }
+            .filter { !$0.isEmpty && normalized.contains($0) })
+        return SearchIntent(
+            terms: terms,
+            appNames: apps,
+            contentTypes: contentTypes(in: normalized),
+            dateRange: dateRange(in: normalized)
+        )
+    }
+
+    private func normalizedSearchText(_ text: String) -> String {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private func contentTypes(in query: String) -> Set<ContentType> {
+        var types = Set<ContentType>()
+        let words = Set(query.split(separator: " ").map(String.init))
+        if !words.intersection(["image", "images", "photo", "photos", "picture", "pictures", "screenshot", "screenshots"]).isEmpty { types.insert(.image) }
+        if !words.intersection(["video", "videos", "movie", "movies", "recording", "recordings"]).isEmpty { types.insert(.video) }
+        if !words.intersection(["file", "files", "document", "documents", "pdf", "download", "downloads"]).isEmpty { types.insert(.file) }
+        if !words.intersection(["link", "links", "url", "urls", "website", "webpage"]).isEmpty { types.insert(.url) }
+        if !words.intersection(["text", "snippet", "snippets", "code", "note", "notes"]).isEmpty { types.insert(.text); types.insert(.richText) }
+        return types
+    }
+
+    private func dateRange(in query: String) -> ClosedRange<Date>? {
+        let calendar = Calendar.current
+        let now = Date()
+        let startOfToday = calendar.startOfDay(for: now)
+        if query.contains("today") {
+            return startOfToday...now
+        }
+        if query.contains("yesterday") {
+            let start = calendar.date(byAdding: .day, value: -1, to: startOfToday) ?? now
+            let end = calendar.date(byAdding: .second, value: -1, to: startOfToday) ?? now
+            return start...end
+        }
+        if query.contains("this week") {
+            let start = calendar.dateInterval(of: .weekOfYear, for: now)?.start ?? calendar.date(byAdding: .day, value: -7, to: now) ?? now
+            return start...now
+        }
+        if query.contains("last week") {
+            let thisWeek = calendar.dateInterval(of: .weekOfYear, for: now)
+            let end = calendar.date(byAdding: .second, value: -1, to: thisWeek?.start ?? now) ?? now
+            let start = calendar.date(byAdding: .day, value: -7, to: end) ?? now
+            return start...end
+        }
+        if query.contains("few weeks") || query.contains("couple weeks") {
+            let start = calendar.date(byAdding: .weekOfYear, value: -6, to: now) ?? now
+            let end = calendar.date(byAdding: .weekOfYear, value: -2, to: now) ?? now
+            return start...end
+        }
+        if let range = relativeDateRange(in: query, unitWords: ["day", "days"], component: .day) { return range }
+        if let range = relativeDateRange(in: query, unitWords: ["week", "weeks"], component: .weekOfYear) { return range }
+        if let range = relativeDateRange(in: query, unitWords: ["month", "months"], component: .month) { return range }
+        return monthNameRange(in: query)
+    }
+
+    private func relativeDateRange(in query: String, unitWords: Set<String>, component: Calendar.Component) -> ClosedRange<Date>? {
+        let words = query.split(separator: " ").map(String.init)
+        guard let unitIndex = words.firstIndex(where: { unitWords.contains($0) }) else { return nil }
+        let calendar = Calendar.current
+        let now = Date()
+        let previous = unitIndex > 0 ? words[unitIndex - 1] : ""
+        let amount = Int(previous) ?? 1
+        if query.contains("last \(words[unitIndex])") {
+            let start = calendar.date(byAdding: component, value: -amount, to: now) ?? now
+            return start...now
+        }
+        if query.contains("\(previous) \(words[unitIndex]) ago") {
+            let end = calendar.date(byAdding: component, value: -amount, to: now) ?? now
+            let start = calendar.date(byAdding: component, value: -(amount + 1), to: now) ?? now
+            return start...end
+        }
+        return nil
+    }
+
+    private func monthNameRange(in query: String) -> ClosedRange<Date>? {
+        let months = Calendar.current.monthSymbols.map { normalizedSearchText($0) }
+        guard let monthIndex = months.firstIndex(where: { query.contains($0) }) else { return nil }
+        let calendar = Calendar.current
+        let nowComponents = calendar.dateComponents([.year], from: Date())
+        guard let year = nowComponents.year else { return nil }
+        let startComponents = DateComponents(year: year, month: monthIndex + 1, day: 1)
+        guard let start = calendar.date(from: startComponents),
+              let end = calendar.date(byAdding: DateComponents(month: 1, second: -1), to: start)
+        else { return nil }
+        return start...end
+    }
     func retrySync(_ item: ClipboardItem) {
-        updateItem(id: item.id) { $0.syncStatus = .pending }
+        updateItem(id: item.id, touchModifiedAt: false) { $0.syncStatus = .pending }
         if let fresh = items.first(where: { $0.id == item.id }) {
             Task { await sync(fresh) }
         }
     }
     func loadLocalDataIfNeeded(for item: ClipboardItem) {
-        guard item.localData == nil, item.bucket != nil, item.storagePath != nil else { return }
+        guard item.localData == nil, item.storagePath != nil else { return }
+        if let manifest = CloudChunkManifest(storagePath: item.storagePath), manifest.kind == .richPayload {
+            guard !assetLoadingIDs.contains(item.id) else { return }
+            assetLoadingIDs.insert(item.id)
+            assetLoadErrors[item.id] = nil
+            Task {
+                defer { assetLoadingIDs.remove(item.id) }
+                do {
+                    guard let hydrated = try await repository.hydrateRichPayload(for: item) else { return }
+                    updateItem(id: item.id, touchModifiedAt: false) {
+                        $0.contentText = hydrated.contentText
+                        $0.rtfData = hydrated.rtfData
+                        $0.htmlData = hydrated.htmlData
+                        $0.rtfdData = hydrated.rtfdData
+                    }
+                } catch {
+                    assetLoadErrors[item.id] = specificCloudErrorMessage(error) ?? "Couldn’t download this item."
+                    handleCloudFailure(error)
+                }
+            }
+            return
+        }
+        if let cached = AssetCache.shared.data(for: item.id) {
+            updateItem(id: item.id, touchModifiedAt: false) { $0.localData = cached }
+            return
+        }
+        guard !assetLoadingIDs.contains(item.id) else { return }
+        assetLoadingIDs.insert(item.id)
+        assetLoadErrors[item.id] = nil
         Task {
-            if let data = try? await repository.downloadData(for: item) {
-                updateItem(id: item.id) { $0.localData = data }
+            defer { assetLoadingIDs.remove(item.id) }
+            do {
+                guard let data = try await repository.downloadData(for: item) else { return }
+                AssetCache.shared.store(data, for: item.id)
+                if item.contentType == .image {
+                    ThumbnailCache.shared.createAndStore(from: data, for: item.id)
+                    if let thumbnail = ThumbnailCache.shared.data(for: item.id) {
+                        try? await repository.updateThumbnail(id: item.id, data: thumbnail)
+                    }
+                }
+                updateItem(id: item.id, touchModifiedAt: false) { $0.localData = data }
+            } catch {
+                assetLoadErrors[item.id] = specificCloudErrorMessage(error) ?? "Couldn’t download this item."
+                handleCloudFailure(error)
+                print("❌ iCloud asset download error: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// One-time, low-priority migration for cards created before thumbnails
+    /// existed. It is deliberately serialized so opening an old library does
+    /// not launch dozens of full-image downloads or make the grid lag.
+    func prepareImageThumbnailIfNeeded(for item: ClipboardItem) {
+        guard item.contentType == .image,
+              item.localData == nil,
+              item.storagePath != nil,
+              ThumbnailCache.shared.data(for: item.id) == nil,
+              !assetLoadingIDs.contains(item.id)
+        else { return }
+
+        assetLoadingIDs.insert(item.id)
+        assetLoadErrors[item.id] = nil
+        Task(priority: .utility) {
+            await LargeTransferScheduler.preview.acquire()
+            defer {
+                assetLoadingIDs.remove(item.id)
+                Task { await LargeTransferScheduler.preview.release() }
+            }
+            do {
+                guard let data = try await repository.downloadData(for: item) else { return }
+                AssetCache.shared.store(data, for: item.id)
+                ThumbnailCache.shared.createAndStore(from: data, for: item.id)
+                updateItem(id: item.id, touchModifiedAt: false) { $0.localData = data }
+                if let thumbnail = ThumbnailCache.shared.data(for: item.id) {
+                    try? await repository.updateThumbnail(id: item.id, data: thumbnail)
+                }
+            } catch {
+                assetLoadErrors[item.id] = specificCloudErrorMessage(error) ?? "Couldn’t prepare this preview."
+                handleCloudFailure(error)
+                print("❌ iCloud thumbnail backfill error: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func assetLoadError(for itemID: UUID) -> String? { assetLoadErrors[itemID] }
+
+    func retryAssetDownload(for item: ClipboardItem) {
+        assetLoadErrors[item.id] = nil
+        loadLocalDataIfNeeded(for: item)
     }
     func toggleFavorite(_ item: ClipboardItem) {
         let newValue = !item.isPinned
         updateItem(id: item.id) { $0.isPinned = newValue }
-        Task {
-            do {
-                try await repository.setFavorite(id: item.id, isFavorite: newValue)
-            } catch {
-                updateItem(id: item.id) { $0.isPinned = !newValue }
-            }
+        runDurableItemMutation(itemID: item.id) { [repository] in
+            try await repository.setFavorite(id: item.id, isFavorite: newValue)
         }
     }
     func moveToTrash(_ item: ClipboardItem) {
+        let deletedDate = Date()
         updateItem(id: item.id) {
             $0.isDeleted = true
-            $0.deletedAt = Date()
+            $0.deletedAt = deletedDate
+        }
+        runDurableItemMutation(itemID: item.id) { [repository] in
+            try await repository.setDeleted(id: item.id, isDeleted: true, deletedAt: deletedDate)
         }
     }
     func restoreFromTrash(_ item: ClipboardItem) {
@@ -231,28 +951,69 @@ final class ClipboardHistoryViewModel: ObservableObject {
             $0.isDeleted = false
             $0.deletedAt = nil
         }
+        runDurableItemMutation(itemID: item.id) { [repository] in
+            try await repository.setDeleted(id: item.id, isDeleted: false, deletedAt: nil)
+        }
     }
     func deleteItem(_ item: ClipboardItem) {
         items.removeAll { $0.id == item.id }
+        AssetCache.shared.remove(for: item.id)
+        pendingItemIDs.remove(item.id)
+        pendingDeletionIDs.insert(item.id)
+        persistLibraryCache()
         Task {
             do {
                 try await repository.delete(id: item.id)
+                pendingDeletionIDs.remove(item.id)
+                persistLibraryCache()
             } catch {
                 print("Failed to delete item: \(error)")
+                handleCloudFailure(error)
             }
         }
     }
     func emptyTrash() {
         let toDelete = trashedItems
         items.removeAll { $0.isDeleted }
+        pendingDeletionIDs.formUnion(toDelete.map(\.id))
+        persistLibraryCache()
         Task {
             for item in toDelete {
-                try? await repository.delete(id: item.id)
+                do { try await repository.delete(id: item.id); pendingDeletionIDs.remove(item.id) }
+                catch { handleCloudFailure(error) }
             }
+            persistLibraryCache()
+        }
+    }
+    func deleteAllItems() {
+        let toDelete = items
+        let foldersToDelete = folders
+        
+        items.removeAll()
+        folders.removeAll()
+        pendingDeletionIDs.formUnion(toDelete.map(\.id))
+        pendingFolderDeletionIDs.formUnion(foldersToDelete.map(\.id))
+        persistLibraryCache()
+        
+        Task {
+            // Delete sequentially to avoid CloudKit request throttling.
+            // project when their history is large.
+            for item in toDelete {
+                do { try await repository.delete(id: item.id); pendingDeletionIDs.remove(item.id) }
+                catch { handleCloudFailure(error) }
+            }
+            for folder in foldersToDelete {
+                do {
+                    try await repository.deleteFolder(id: folder.id)
+                    pendingFolderDeletionIDs.remove(folder.id)
+                }
+                catch { handleCloudFailure(error) }
+            }
+            persistLibraryCache()
         }
     }
     func itemCount(in folder: ClipboardFolder) -> Int {
-        items.filter { $0.folderIDs.contains(folder.id) }.count
+        LibraryMetadataStore.shared.itemCount(inFolder: folder.id)
     }
     func items(in folderID: UUID) -> [ClipboardItem] {
         items.filter { $0.folderIDs.contains(folderID) }
@@ -262,18 +1023,20 @@ final class ClipboardHistoryViewModel: ObservableObject {
         let folder = ClipboardFolder(id: UUID(), name: name, createdAt: Date(), updatedAt: Date())
         pendingFolderIDs.insert(folder.id)
         folders.append(folder)
+        persistLibraryCache()
         Task {
             do {
                 let currentName = folders.first(where: { $0.id == folder.id })?.name ?? folder.name
-                try await repository.createFolder(id: folder.id, name: currentName)
+                try await repository.createFolder(id: folder.id, name: currentName, createdAt: folder.createdAt, updatedAt: folder.updatedAt)
                 pendingFolderIDs.remove(folder.id)
                 let remoteFolders = try await repository.fetchFolders()
                 folders = mergeFolders(remoteFolders)
                 loadError = nil
             } catch {
-                pendingFolderIDs.remove(folder.id)
-                folders.removeAll { $0.id == folder.id }
+                pendingFolderIDs.insert(folder.id)
+                persistLibraryCache()
                 loadError = folderErrorMessage(for: error, fallback: "Couldn't create folder")
+                handleCloudFailure(error)
             }
         }
         return folder
@@ -281,38 +1044,46 @@ final class ClipboardHistoryViewModel: ObservableObject {
     func renameFolder(_ folder: ClipboardFolder, name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let newName = trimmed.isEmpty ? "Untitled Folder" : trimmed
-        let previousFolder = folder
         updateFolder(id: folder.id) {
             $0.name = newName
             $0.updatedAt = Date()
         }
+        // Renames are durable before the asynchronous write begins.
+        pendingFolderIDs.insert(folder.id)
+        persistLibraryCache()
         Task {
             do {
                 try await repository.renameFolder(id: folder.id, name: newName)
+                pendingFolderIDs.remove(folder.id)
+                persistLibraryCache()
                 loadError = nil
             } catch {
-                updateFolder(id: previousFolder.id) { $0 = previousFolder }
+                pendingFolderIDs.insert(folder.id)
+                persistLibraryCache()
                 loadError = folderErrorMessage(for: error, fallback: "Couldn't rename folder")
+                handleCloudFailure(error)
             }
         }
     }
     func deleteFolder(_ folder: ClipboardFolder) {
-        let previousFolders = folders
         let affectedItemIDs = items.filter { $0.folderIDs.contains(folder.id) }.map(\.id)
         folders.removeAll { $0.id == folder.id }
+        pendingFolderDeletionIDs.insert(folder.id)
+        persistLibraryCache()
         for itemID in affectedItemIDs {
             updateItem(id: itemID) { $0.folderIDs.remove(folder.id) }
         }
         Task {
             do {
                 try await repository.deleteFolder(id: folder.id)
+                pendingFolderDeletionIDs.remove(folder.id)
+                persistLibraryCache()
                 loadError = nil
             } catch {
-                folders = previousFolders
-                for itemID in affectedItemIDs {
-                    updateItem(id: itemID) { $0.folderIDs.insert(folder.id) }
-                }
+                // Keep the local deletion and retry it later. Restoring the
+                // folder here makes an offline delete appear to have failed.
                 loadError = folderErrorMessage(for: error, fallback: "Couldn't delete folder")
+                handleCloudFailure(error)
             }
         }
     }
@@ -327,38 +1098,21 @@ final class ClipboardHistoryViewModel: ObservableObject {
         
         guard !itemsToMove.isEmpty else { return }
         
-        var previousFolderIDs: [UUID: Set<UUID>] = [:]
-        
         for id in itemsToMove {
-            if let item = items.first(where: { $0.id == id }) {
-                previousFolderIDs[id] = item.folderIDs
-                updateItem(id: id) { $0.folderIDs = [folder.id] }
-            }
+            updateItem(id: id) { $0.folderIDs = [folder.id] }
         }
         
-        Task {
-            do {
-                try await repository.addToFolder(ids: itemsToMove, folderID: folder.id)
-                loadError = nil
-            } catch {
-                for (itemID, oldFolders) in previousFolderIDs {
-                    updateItem(id: itemID) { $0.folderIDs = oldFolders }
-                }
-                loadError = folderErrorMessage(for: error, fallback: "Couldn't move item to folder")
+        for itemID in itemsToMove {
+            runDurableItemMutation(itemID: itemID) { [repository] in
+                try await repository.addToFolder(ids: [itemID], folderID: folder.id)
             }
         }
     }
     func removeFromFolder(_ item: ClipboardItem, folderID: UUID) {
         guard item.folderIDs.contains(folderID) else { return }
         updateItem(id: item.id) { $0.folderIDs.remove(folderID) }
-        Task {
-            do {
-                try await repository.removeFromFolder(id: item.id, folderID: folderID)
-                loadError = nil
-            } catch {
-                updateItem(id: item.id) { $0.folderIDs.insert(folderID) }
-                loadError = folderErrorMessage(for: error, fallback: "Couldn't remove item from folder")
-            }
+        runDurableItemMutation(itemID: item.id) { [repository] in
+            try await repository.removeFromFolder(id: item.id, folderID: folderID)
         }
     }
     func copyToPasteboard(_ item: ClipboardItem) {
@@ -382,7 +1136,25 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 : ClipboardRestoreResult(didCopy: false, message: "Could not copy item")
         }
         if item.contentType == .richText {
-            return writeRichText(item, to: pasteboard)
+            var richItem = item
+            if let manifest = CloudChunkManifest(storagePath: item.storagePath), manifest.kind == .richPayload {
+                do {
+                    guard let hydrated = try await repository.hydrateRichPayload(for: item) else {
+                        return ClipboardRestoreResult(didCopy: false, message: "Could not restore rich text")
+                    }
+                    richItem = hydrated
+                    updateItem(id: item.id, touchModifiedAt: false) {
+                        $0.contentText = hydrated.contentText
+                        $0.rtfData = hydrated.rtfData
+                        $0.htmlData = hydrated.htmlData
+                        $0.rtfdData = hydrated.rtfdData
+                    }
+                } catch {
+                    handleCloudFailure(error)
+                    return ClipboardRestoreResult(didCopy: false, message: specificCloudErrorMessage(error) ?? "Could not restore rich text")
+                }
+            }
+            return writeRichText(richItem, to: pasteboard)
                 ? ClipboardRestoreResult(didCopy: true, message: "Copied to clipboard")
                 : ClipboardRestoreResult(didCopy: false, message: "Could not copy rich text")
         }
@@ -409,7 +1181,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
             return ClipboardRestoreResult(didCopy: false, message: "Item data is unavailable")
         }
         if let data = try? await repository.downloadData(for: item) {
-            updateItem(id: item.id) { $0.localData = data }
+            updateItem(id: item.id, touchModifiedAt: false) { $0.localData = data }
             return writeBinary(data, for: item, to: pasteboard)
                 ? ClipboardRestoreResult(didCopy: true, message: "Copied to clipboard")
                 : ClipboardRestoreResult(didCopy: false, message: "Could not copy item")
@@ -449,7 +1221,9 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 return NSItemProvider(object: text as NSString)
             }
         case .richText:
-            let provider = NSItemProvider()
+            // Start with the standard text object. Mail accepts this concrete
+            // AppKit representation reliably; richer forms are additional.
+            let provider = NSItemProvider(object: (item.contentText ?? "") as NSString)
             if let data = item.rtfdData {
                 provider.registerDataRepresentation(forTypeIdentifier: UTType.rtfd.identifier, visibility: .all) { completion in
                     completion(data, nil)
@@ -471,9 +1245,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 }
                 return provider
             }
-            if let text = item.contentText {
-                return NSItemProvider(object: text as NSString)
-            }
+            return provider
         case .image:
             if let data = item.localData {
                 let provider = NSItemProvider()
@@ -487,6 +1259,12 @@ final class ClipboardHistoryViewModel: ObservableObject {
             break
         }
         return NSItemProvider(object: (item.contentText ?? item.fileName ?? "") as NSString)
+    }
+
+    /// Supplies only standard, app-compatible content for drags leaving the
+    /// menu-bar strip.
+    func stripDragItemProvider(for item: ClipboardItem) -> NSItemProvider {
+        dragItemProvider(for: item)
     }
     func folderDragItemProvider(for itemIDs: [UUID]) -> NSItemProvider {
         let uniqueIDs = Array(Set(itemIDs))
@@ -578,13 +1356,171 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
         pasteboard.writeObjects([pbItem])
     }
-    private func updateItem(id: UUID, _ mutate: (inout ClipboardItem) -> Void) {
+    private func updateItem(id: UUID, touchModifiedAt: Bool = true, _ mutate: (inout ClipboardItem) -> Void) {
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
         mutate(&items[idx])
+        if touchModifiedAt { items[idx].updatedAt = Date() }
+        persistLibraryCache()
     }
     private func updateFolder(id: UUID, _ mutate: (inout ClipboardFolder) -> Void) {
         guard let idx = folders.firstIndex(where: { $0.id == id }) else { return }
         mutate(&folders[idx])
+        persistLibraryCache()
+    }
+    func persistLibraryCache(immediately: Bool = false) {
+        let queues = LibraryMetadataStore.QueueState(
+            pendingItemIDs: pendingItemIDs,
+            pendingFolderIDs: pendingFolderIDs,
+            pendingDeletionIDs: pendingDeletionIDs,
+            pendingFolderDeletionIDs: pendingFolderDeletionIDs,
+            pendingChainIDs: pendingChainIDs,
+            pendingChainDeletionIDs: pendingChainDeletionIDs
+        )
+        // Queue state and its payload must be committed immediately. This keeps
+        // an offline mutation crash-safe before any CloudKit I/O begins.
+        LibraryMetadataStore.shared.remove(
+            items: pendingDeletionIDs,
+            folders: pendingFolderDeletionIDs,
+            chains: pendingChainDeletionIDs
+        )
+        LibraryMetadataStore.shared.upsert(
+            items: items.filter { pendingItemIDs.contains($0.id) },
+            folders: folders.filter { pendingFolderIDs.contains($0.id) },
+            chains: chains.filter { pendingChainIDs.contains($0.id) },
+            chainItems: chainItems.filter { pendingChainIDs.contains($0.key) }.values.flatMap { $0 },
+            queues: queues
+        )
+
+        metadataPersistenceTask?.cancel()
+        let visibleItems = items
+        let visibleFolders = folders
+        let visibleChains = chains
+        let visibleChainItems = chainItems.values.flatMap { $0 }
+        let write = {
+            LibraryMetadataStore.shared.upsert(
+                items: visibleItems,
+                folders: visibleFolders,
+                chains: visibleChains,
+                chainItems: visibleChainItems,
+                queues: queues
+            )
+        }
+        if immediately {
+            write()
+        } else {
+            metadataPersistenceTask = Task {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled else { return }
+                write()
+            }
+        }
+        updateDiagnostics()
+    }
+    private func queueItemForRetry(_ id: UUID) {
+        pendingItemIDs.insert(id)
+        updateItem(id: id, touchModifiedAt: false) { $0.syncStatus = .pending }
+        persistLibraryCache()
+        cloudSyncState = .offline
+    }
+
+    /// Saves the local intent before a metadata-only CloudKit mutation begins.
+    /// If the process stops at any point, the normal item queue replays the
+    /// whole current record; CloudKit's timestamp conflict rule prevents that
+    /// replay from replacing a newer edit from another device.
+    private func runDurableItemMutation(itemID: UUID, operation: @escaping () async throws -> Void) {
+        queueItemForRetry(itemID)
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await operation()
+                self.pendingItemIDs.remove(itemID)
+                self.updateItem(id: itemID, touchModifiedAt: false) { $0.syncStatus = .synced }
+                self.persistLibraryCache()
+                self.loadError = nil
+            } catch {
+                self.loadError = self.folderErrorMessage(for: error, fallback: "Change queued until iCloud is available")
+                self.handleCloudFailure(error)
+            }
+        }
+    }
+    private func retryQueuedChanges() async {
+        // Deliberately serial: retrying every operation at once is the fastest
+        // route to CloudKit throttling after a long offline period. A failed
+        // operation stays on disk and stops this pass; the explicit server
+        // Retry-After delay is then scheduled by handleCloudFailure.
+        do {
+            for id in pendingDeletionIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
+                try await repository.delete(id: id)
+                pendingDeletionIDs.remove(id)
+                persistLibraryCache()
+            }
+            for id in pendingFolderDeletionIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
+                try await repository.deleteFolder(id: id)
+                pendingFolderDeletionIDs.remove(id)
+                persistLibraryCache()
+            }
+            for id in pendingChainDeletionIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
+                try await repository.deleteChain(id: id)
+                pendingChainDeletionIDs.remove(id)
+                persistLibraryCache()
+            }
+            for id in pendingChainIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
+                guard let chain = chains.first(where: { $0.id == id }) else {
+                    pendingChainIDs.remove(id)
+                    continue
+                }
+                try await repository.createChain(id: chain.id, name: chain.name, createdAt: chain.createdAt, updatedAt: chain.updatedAt)
+                try await repository.deleteChainItems(chainID: chain.id)
+                try await repository.addChainItems(chainItems[id] ?? [], chainID: chain.id)
+                pendingChainIDs.remove(id)
+                persistLibraryCache()
+            }
+            for id in pendingItemIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
+                guard let item = items.first(where: { $0.id == id }) else {
+                    pendingItemIDs.remove(id)
+                    continue
+                }
+                guard await sync(item) else { return }
+            }
+            for id in pendingFolderIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
+                guard let folder = folders.first(where: { $0.id == id }) else {
+                    pendingFolderIDs.remove(id)
+                    continue
+                }
+                try await repository.createFolder(id: folder.id, name: folder.name, createdAt: folder.createdAt, updatedAt: folder.updatedAt)
+                pendingFolderIDs.remove(id)
+                persistLibraryCache()
+            }
+        } catch {
+            cloudSyncState = isTransientCloudError(error) ? .offline : .failed(cloudErrorMessage(error))
+            handleCloudFailure(error)
+        }
+    }
+    private func isTransientCloudError(_ error: Error) -> Bool {
+        guard let cloudError = error as? CKError else { return false }
+        return [.networkUnavailable, .networkFailure, .serviceUnavailable, .requestRateLimited, .zoneBusy].contains(cloudError.code)
+    }
+    private func updateDiagnostics() {
+        CloudSyncDiagnostics.shared.updateQueueCount(pendingItemIDs.count + pendingFolderIDs.count + pendingDeletionIDs.count + pendingFolderDeletionIDs.count + pendingChainIDs.count + pendingChainDeletionIDs.count)
+    }
+    private func handleCloudFailure(_ error: Error) {
+        CloudSyncDiagnostics.shared.recordFailure(error)
+        guard let cloudError = error as? CKError,
+              let seconds = (cloudError as NSError).userInfo[CKErrorRetryAfterKey] as? NSNumber
+        else { return }
+        let retryAt = Date().addingTimeInterval(seconds.doubleValue)
+        UserDefaults.standard.set(retryAt, forKey: retryNotBeforeKey)
+        scheduleRetry(at: retryAt)
+    }
+    private func scheduleRetry(at date: Date) {
+        retryTask?.cancel()
+        retryTask = Task { [weak self] in
+            let delay = max(0, date.timeIntervalSinceNow)
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            UserDefaults.standard.removeObject(forKey: self.retryNotBeforeKey)
+            await self.loadHistory()
+        }
     }
     private func mergeFolders(_ remoteFolders: [ClipboardFolder]) -> [ClipboardFolder] {
         let pendingFolders = folders.filter { localFolder in
@@ -594,17 +1530,34 @@ final class ClipboardHistoryViewModel: ObservableObject {
         return remoteFolders + pendingFolders
     }
     private func folderErrorMessage(for error: Error, fallback: String) -> String {
+        if let message = specificCloudErrorMessage(error) { return message }
         let message = error.localizedDescription.lowercased()
-        if message.contains("user_id") {
-            return "Folder schema still requires user_id. Update the folders table for local app access."
-        }
-        if message.contains("permission") || message.contains("policy") || message.contains("row-level security") {
-            return "Folder permissions are blocking this action in Supabase."
-        }
-        if message.contains("violates foreign key constraint") {
-            return "Folder relationship is out of sync. Try reopening the app."
+        if message.contains("permission") || message.contains("policy") {
+            return "iCloud permissions are blocking this folder action."
         }
         return fallback
+    }
+    private func cloudErrorMessage(_ error: Error) -> String {
+        specificCloudErrorMessage(error) ?? error.localizedDescription
+    }
+    private func specificCloudErrorMessage(_ error: Error) -> String? {
+        if let persistenceError = error as? CloudKitPersistenceError,
+           case .accountUnavailable = persistenceError {
+            return "Sign in to iCloud in System Settings, then try again."
+        }
+        guard let cloudError = error as? CKError else { return nil }
+        switch cloudError.code {
+        case .quotaExceeded:
+            return "Your iCloud storage or CloudKit quota is full. Free storage, then sync again."
+        case .notAuthenticated:
+            return "Sign in to iCloud in System Settings, then try again."
+        case .permissionFailure:
+            return "iCloud permission was denied for this library."
+        case .networkUnavailable, .networkFailure:
+            return "You are offline. Changes will retry when a connection returns."
+        default:
+            return nil
+        }
     }
     
     // MARK: - Chain Actions
@@ -623,43 +1576,46 @@ final class ClipboardHistoryViewModel: ObservableObject {
         
         chains.append(chain)
         chainItems[chain.id] = chainItemsForThisChain
+        pendingChainIDs.insert(chain.id)
+        persistLibraryCache()
         
         Task {
             do {
-                try await repository.createChain(id: chain.id, name: name)
+                try await repository.createChain(id: chain.id, name: name, createdAt: chain.createdAt, updatedAt: chain.updatedAt)
                 try await repository.addChainItems(chainItemsForThisChain, chainID: chain.id)
+                pendingChainIDs.remove(chain.id)
+                persistLibraryCache()
             } catch {
                 print("Failed to create chain: \(error)")
-                self.chains.removeAll { $0.id == chain.id }
-                self.chainItems.removeValue(forKey: chain.id)
+                self.pendingChainIDs.insert(chain.id)
+                self.persistLibraryCache()
+                self.handleCloudFailure(error)
             }
         }
     }
     
     func renameChain(_ chain: Chain, name: String) {
         guard let index = chains.firstIndex(where: { $0.id == chain.id }) else { return }
-        let oldName = chains[index].name
         chains[index].name = name
         chains[index].updatedAt = Date()
+        pendingChainIDs.insert(chain.id)
+        persistLibraryCache()
         
         Task {
             do {
                 try await repository.renameChain(id: chain.id, name: name)
+                pendingChainIDs.remove(chain.id)
+                persistLibraryCache()
             } catch {
                 print("Failed to rename chain: \(error)")
-                DispatchQueue.main.async {
-                    self.chains[index].name = oldName
-                }
+                self.pendingChainIDs.insert(chain.id); self.persistLibraryCache(); self.handleCloudFailure(error)
             }
         }
     }
     
     func updateChain(_ chain: Chain, name: String, snippetIDs: [UUID]) {
         guard let index = chains.firstIndex(where: { $0.id == chain.id }) else { return }
-        
         let oldName = chains[index].name
-        let oldItems = chainItems[chain.id]
-        
         chains[index].name = name
         chains[index].updatedAt = Date()
         
@@ -669,6 +1625,8 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
         
         chainItems[chain.id] = newChainItems
+        pendingChainIDs.insert(chain.id)
+        persistLibraryCache()
         
         Task {
             do {
@@ -679,49 +1637,56 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 if !newChainItems.isEmpty {
                     try await repository.addChainItems(newChainItems, chainID: chain.id)
                 }
+                pendingChainIDs.remove(chain.id)
+                persistLibraryCache()
             } catch {
                 print("Failed to update chain: \(error)")
-                DispatchQueue.main.async {
-                    self.chains[index].name = oldName
-                    self.chainItems[chain.id] = oldItems
-                }
+                self.pendingChainIDs.insert(chain.id); self.persistLibraryCache(); self.handleCloudFailure(error)
             }
         }
     }
     
     func deleteChain(_ chain: Chain) {
         guard let index = chains.firstIndex(where: { $0.id == chain.id }) else { return }
-        let removedChain = chains.remove(at: index)
-        let removedItems = chainItems.removeValue(forKey: chain.id)
+        chains.remove(at: index)
+        chainItems.removeValue(forKey: chain.id)
+        // A deletion is also an operation. Queue it first so a quit/crash
+        // cannot make the remote chain return on the next launch.
+        pendingChainIDs.remove(chain.id)
+        pendingChainDeletionIDs.insert(chain.id)
+        persistLibraryCache()
         
         Task {
             do {
                 try await repository.deleteChain(id: chain.id)
+                pendingChainDeletionIDs.remove(chain.id)
+                persistLibraryCache()
             } catch {
                 print("Failed to delete chain: \(error)")
-                self.chains.insert(removedChain, at: index)
-                self.chainItems[chain.id] = removedItems
+                self.pendingChainDeletionIDs.insert(chain.id); self.persistLibraryCache(); self.handleCloudFailure(error)
             }
         }
     }
     
     func updateChainItems(chain: Chain, snippetIDs: [UUID]) {
-        let oldItems = chainItems[chain.id]
-        
         var newChainItems: [ChainItem] = []
         for (index, snippetID) in snippetIDs.enumerated() {
             newChainItems.append(ChainItem(id: UUID(), chainID: chain.id, snippetID: snippetID, position: index))
         }
         
         chainItems[chain.id] = newChainItems
+        pendingChainIDs.insert(chain.id)
+        persistLibraryCache()
         
         Task {
             do {
                 try await repository.deleteChainItems(chainID: chain.id)
                 try await repository.addChainItems(newChainItems, chainID: chain.id)
+                pendingChainIDs.remove(chain.id)
+                persistLibraryCache()
             } catch {
                 print("Failed to update chain items: \(error)")
-                self.chainItems[chain.id] = oldItems
+                self.pendingChainIDs.insert(chain.id); self.persistLibraryCache(); self.handleCloudFailure(error)
             }
         }
     }

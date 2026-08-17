@@ -9,6 +9,7 @@ final class HotkeyManager {
     private var clearQueueHotkeyID: UInt32 = 2
     private var pasteHotkeyID: UInt32 = 3
     private var reversePasteHotkeyID: UInt32 = 4
+    private var searchHotkeyID: UInt32 = 5
     private init() {
         installEventHandler()
     }
@@ -47,6 +48,10 @@ final class HotkeyManager {
             hotkeyRefs[reversePasteHotkeyID] = nil
             registeredHotkeys[reversePasteHotkeyID] = nil
         }
+    }
+    @discardableResult
+    func registerSearchHotkey(_ combination: KeyCombination, callback: @escaping () -> Void) -> Bool {
+        return registerHotkey(id: searchHotkeyID, combination: combination, callback: callback)
     }
     func unregisterAllHotkeys() {
         for (_, ref) in hotkeyRefs {

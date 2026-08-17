@@ -11,6 +11,7 @@ final class PsychoCopyManager: ObservableObject {
     static let modeChangedNotification = Notification.Name("PsychoCopyModeChanged")
     static let queueChangedNotification = Notification.Name("PsychoCopyQueueChanged")
     static let secureInputBlockedNotification = Notification.Name("PsychoCopySecureInputBlocked")
+    static let searchHotkeyChangedNotification = Notification.Name("PsychoCopySearchHotkeyChanged")
     private let hotkeyManager = HotkeyManager.shared
     private(set) var isSimulatingPaste = false
     private var isPastingNow: Bool = false
@@ -19,6 +20,7 @@ final class PsychoCopyManager: ObservableObject {
     private var vKeyCode: CGKeyCode = 0x09 
     private var layoutObserver: NSObjectProtocol?
     init() {
+        settings = PsychoCopySettings.load()
         resolveVKeyCode()
         installLayoutObserver()
         setupHotkeys()
@@ -84,6 +86,45 @@ final class PsychoCopyManager: ObservableObject {
         hotkeyManager.registerClearQueueHotkey(settings.clearQueueHotkey) { [weak self] in
             Task { @MainActor in self?.clearQueue() }
         }
+    }
+
+    // MARK: - Public hotkey update API
+
+    func updateToggleHotkey(_ combo: KeyCombination) {
+        settings.toggleHotkey = combo
+        settings.save()
+        hotkeyManager.registerToggleHotkey(combo) { [weak self] in
+            Task { @MainActor in self?.toggleMultiCopyMode() }
+        }
+    }
+
+    func updateClearQueueHotkey(_ combo: KeyCombination) {
+        settings.clearQueueHotkey = combo
+        settings.save()
+        hotkeyManager.registerClearQueueHotkey(combo) { [weak self] in
+            Task { @MainActor in self?.clearQueue() }
+        }
+    }
+
+    func updateReversePasteHotkey(_ combo: KeyCombination) {
+        settings.reversePasteHotkey = combo
+        settings.save()
+        // Re-register only when sequential paste mode is active
+        if isMultiCopyModeActive {
+            hotkeyManager.registerReversePasteHotkey(combo) { [weak self] in
+                guard let self, !self.isPastingNow else { return }
+                self.onGlobalReversePasteRequested?()
+            }
+        }
+    }
+
+    func updateSearchHotkey(_ combo: KeyCombination) {
+        settings.searchHotkey = combo
+        settings.save()
+        NotificationCenter.default.post(
+            name: Self.searchHotkeyChangedNotification,
+            object: combo
+        )
     }
     private func registerPasteHotkey() {
         let pasteCombo = KeyCombination(key: "V", modifiers: [.command])
@@ -202,7 +243,7 @@ final class PsychoCopyManager: ObservableObject {
     var toggleHotkeyLabel: String {
         hotkeyLabel(for: settings.toggleHotkey)
     }
-    private func hotkeyLabel(for combo: KeyCombination) -> String {
+    func hotkeyLabel(for combo: KeyCombination) -> String {
         var parts: [String] = []
         if combo.modifiers.contains(.control) { parts.append("⌃") }
         if combo.modifiers.contains(.option)  { parts.append("⌥") }

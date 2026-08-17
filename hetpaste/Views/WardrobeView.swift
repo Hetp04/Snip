@@ -134,11 +134,14 @@ struct WardrobeView: View {
             },
             onPrimaryTap: {
                 controller.focusItem(at: index, itemCount: viewModel.items.count)
-            }
+            },
+            isAssetLoading: viewModel.assetLoadingIDs.contains(item.id),
+            assetLoadError: viewModel.assetLoadError(for: item.id),
+            onRetryAssetDownload: { viewModel.retryAssetDownload(for: item) }
         )
         .frame(width: cardWidth)
         .onAppear {
-            if item.contentType == .image {
+            if item.contentType == .image || item.contentType == .file || item.contentType == .video {
                 viewModel.loadLocalDataIfNeeded(for: item)
             }
         }
@@ -238,6 +241,9 @@ struct WardrobeItemCard: View {
     let onDelete: () -> Void
     let onRevealInFinder: () -> Void
     let onPrimaryTap: () -> Void
+    var isAssetLoading: Bool = false
+    var assetLoadError: String? = nil
+    var onRetryAssetDownload: () -> Void = {}
     
     @State private var isHovered = false
     @State private var isCopyHovered = false
@@ -329,7 +335,7 @@ struct WardrobeItemCard: View {
             image: headerIcon,
             fallbackSystemName: appIconName,
             fallbackColor: appIconColor,
-            size: 48,
+            size: 52,
             elevation: .medium
         )
     }
@@ -382,15 +388,15 @@ struct WardrobeItemCard: View {
     
     private var pasteHeader: some View {
         let gradients = Theme.appHeaderGradient(for: pasteSourceName, fallbackColor: pasteHeaderColor)
-        return HStack(alignment: .center, spacing: 12) {
+        return HStack(alignment: .center, spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(pasteSourceName)
-                    .font(.system(size: 15, weight: .bold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Text("\(pasteTypeLabel) · \(item.createdAt.relativeString())")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
@@ -400,20 +406,17 @@ struct WardrobeItemCard: View {
             largeHeaderAppIcon
                 .allowsHitTesting(false)
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 12)
-        .padding(.vertical, 6)
+        .padding(.leading, 20)
+        .padding(.trailing, 16)
+        .padding(.vertical, 8)
+        .frame(minWidth: 0, maxWidth: .infinity)
         .background(
-            RoundedRectangle(cornerRadius: 18)
-                .fill(
-                    LinearGradient(
-                        colors: [gradients.0, gradients.1],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
+            LinearGradient(
+                colors: [gradients.0, gradients.1],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
         )
-        .padding([.horizontal, .top], 10)
     }
     
     @ViewBuilder
@@ -421,7 +424,7 @@ struct WardrobeItemCard: View {
         ZStack {
             Theme.neoContent
                 .softInnerShadow(
-                    RoundedRectangle(cornerRadius: 16),
+                    RoundedRectangle(cornerRadius: 14),
                     darkShadow: Color(hex: "#A3B1C6").opacity(0.35),
                     lightShadow: Color.white,
                     spread: 0.04,
@@ -433,12 +436,11 @@ struct WardrobeItemCard: View {
                 if let data = item.localData, let nsImage = NSImage(data: data) {
                     PasteImagePreview(data: data)
                 } else {
-                    FileIconView(item: item)
-                        .padding(14)
+                    assetPlaceholder
                 }
             case .video:
                 MiniVideoMockup()
-                    .padding(12)
+                    .padding(10)
             case .file:
                 pasteFilePreview
             case .url:
@@ -448,16 +450,49 @@ struct WardrobeItemCard: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 100)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .frame(height: 92)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
             if hasFinderReference {
                 onRevealInFinder()
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
+        .padding(.bottom, 6)
+    }
+
+    @ViewBuilder
+    private var assetPlaceholder: some View {
+        VStack(spacing: 7) {
+            if isAssetLoading {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Downloading from iCloud…")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+            } else if let assetLoadError {
+                Image(systemName: "exclamationmark.icloud")
+                    .foregroundColor(.orange)
+                Text(assetLoadError)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                Button("Retry", action: onRetryAssetDownload)
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 10, weight: .semibold))
+            } else {
+                Image(systemName: "icloud.and.arrow.down")
+                    .foregroundColor(Theme.textSecondary)
+                Text("Loading preview…")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(10)
     }
     
     @ViewBuilder
@@ -470,8 +505,8 @@ struct WardrobeItemCard: View {
                     .lineLimit(4)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 10)
             } else {
                 emptyContentView
             }
@@ -497,7 +532,7 @@ struct WardrobeItemCard: View {
             }
             Spacer()
         }
-        .padding(14)
+        .padding(10)
     }
     
     @ViewBuilder
@@ -520,7 +555,7 @@ struct WardrobeItemCard: View {
                     .frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(14)
+            .padding(10)
         } else {
             emptyContentView
         }
@@ -566,8 +601,8 @@ struct WardrobeItemCard: View {
                 .help("Remove from Wardrobe")
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.bottom, 12)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 8)
         .background(Theme.neoBase)
     }
     

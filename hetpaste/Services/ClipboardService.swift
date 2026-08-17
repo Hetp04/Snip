@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import UniformTypeIdentifiers
 final class ClipboardService: ObservableObject {
+    private static let capturePausedDefaultsKey = "clipboard-capture-paused"
     private struct AppSource {
         let name: String
         let bundleID: String?
@@ -11,6 +12,8 @@ final class ClipboardService: ObservableObject {
     var onNewItem: ((ClipboardItem) -> Void)?
     private var timer: Timer?
     private var lastChangeCount: Int = NSPasteboard.general.changeCount
+    private var captureGeneration: UInt = 0
+    @Published private(set) var isCapturePaused: Bool
     private let pollInterval: TimeInterval = 0.25
     private let captureQueue = DispatchQueue(label: "com.hetpaste.clipboard-capture", qos: .userInitiated)
     private static let codeFileExtensions: Set<String> = [
@@ -25,9 +28,16 @@ final class ClipboardService: ObservableObject {
         Bundle.main.bundleIdentifier
     }
     var captureRawTypes: Bool = false
+
+    init() {
+        isCapturePaused = UserDefaults.standard.bool(forKey: Self.capturePausedDefaultsKey)
+    }
+
     func start() {
-        guard timer == nil else { return }
+        // A paused monitor deliberately has no timer.  Always establish a
+        // fresh baseline so content copied before launch/resume is ignored.
         lastChangeCount = NSPasteboard.general.changeCount
+        guard !isCapturePaused, timer == nil else { return }
         updateLastExternalApp(from: NSWorkspace.shared.frontmostApplication)
         installWorkspaceObserver()
         let timer = Timer(timeInterval: pollInterval, repeats: true) { [weak self] _ in
@@ -44,10 +54,40 @@ final class ClipboardService: ObservableObject {
             self.workspaceObserver = nil
         }
     }
+
+    func pauseCapture() {
+        guard !isCapturePaused else { return }
+        isCapturePaused = true
+        UserDefaults.standard.set(true, forKey: Self.capturePausedDefaultsKey)
+
+        // Invalidate any in-flight capture work before stopping the poller.
+        captureGeneration &+= 1
+        lastChangeCount = NSPasteboard.general.changeCount
+        stop()
+    }
+
+    func resumeCapture() {
+        guard isCapturePaused else { return }
+        isCapturePaused = false
+        UserDefaults.standard.set(false, forKey: Self.capturePausedDefaultsKey)
+
+        // Do not import the pasteboard contents copied while monitoring was
+        // paused.  Only changes occurring after this baseline are captured.
+        lastChangeCount = NSPasteboard.general.changeCount
+        start()
+    }
+
+    func toggleCapturePaused() {
+        isCapturePaused ? resumeCapture() : pauseCapture()
+    }
     func markSelfCopy() {
         ignoreNextChangeCount = NSPasteboard.general.changeCount
     }
     private func poll() {
+        guard !isCapturePaused else {
+            lastChangeCount = NSPasteboard.general.changeCount
+            return
+        }
         let pasteboard = NSPasteboard.general
         let current = pasteboard.changeCount
         guard current != lastChangeCount else { return }
@@ -58,11 +98,13 @@ final class ClipboardService: ObservableObject {
         }
         let shouldCaptureRaw = captureRawTypes
         let sourceApp = detectedSourceApp()
+        let generation = captureGeneration
         captureQueue.async { [weak self] in
             guard let self else { return }
             let snapshot = PasteboardSnapshot(from: NSPasteboard.general)
             guard let item = self.captureFromSnapshot(snapshot, sourceApp: sourceApp, captureRaw: shouldCaptureRaw) else { return }
             DispatchQueue.main.async {
+                guard !self.isCapturePaused, self.captureGeneration == generation else { return }
                 self.onNewItem?(item)
             }
         }
@@ -206,9 +248,10 @@ final class ClipboardService: ObservableObject {
                 documentAttributes: nil
             )
             guard let attributed, isMeaningfullyRichText(attributed, plainText: plainText) else { continue }
+            let cleanedText = stripLeadingBrowserChrome(from: attributed.string)
             return ClipboardItem(
                 contentType: .richText,
-                contentText: attributed.string,
+                contentText: cleanedText,
                 sourceAppName: appName,
                 sourceAppBundleID: bundleID,
                 syncStatus: .pending,
@@ -226,7 +269,7 @@ final class ClipboardService: ObservableObject {
         htmlData: Data?
     ) -> String? {
         if let text = string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-            return text
+            return stripLeadingBrowserChrome(from: text)
         }
         let pairs: [(Data?, NSAttributedString.DocumentType)] = [
             (rtfdData, .rtfd), (rtfData, .rtf), (htmlData, .html)
@@ -237,9 +280,36 @@ final class ClipboardService: ObservableObject {
                 options: [.documentType: docType],
                 documentAttributes: nil))?.string
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-               !text.isEmpty { return text }
+               !text.isEmpty { return stripLeadingBrowserChrome(from: text) }
         }
         return nil
+    }
+
+    /// Browsers sometimes put accessibility links and navigation controls in the
+    /// plain-text clipboard representation ahead of the content the user copied.
+    /// Remove only a leading run after a strong accessibility marker; normal text
+    /// that happens to mention one of these words is left untouched.
+    private func stripLeadingBrowserChrome(from text: String) -> String {
+        var lines = text.components(separatedBy: .newlines)
+        let chromeLines: Set<String> = [
+            "skip to main content", "accessibility help", "accessibility feedback",
+            "sign in", "ai mode", "all", "images", "videos", "shopping", "news",
+            "short videos", "more", "tools"
+        ]
+        guard let first = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              first == "skip to main content" || first == "accessibility help"
+        else { return text }
+
+        while let first = lines.first {
+            let normalized = first.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if normalized.isEmpty || chromeLines.contains(normalized) {
+                lines.removeFirst()
+            } else {
+                break
+            }
+        }
+        let cleaned = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? text : cleaned
     }
     private func resolvedImageData(png: Data?, tiff: Data?) -> Data? {
         if let png { return png }

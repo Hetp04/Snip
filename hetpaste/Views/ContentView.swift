@@ -160,19 +160,6 @@ struct ContentView: View {
             minHeight: 640, idealHeight: 640, maxHeight: .infinity
         )
         .background(Theme.bg)
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button(action: {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        isSidebarVisible.toggle()
-                    }
-                }) {
-                    Image(systemName: "sidebar.left")
-                        .foregroundColor(Theme.textSecondary)
-                }
-                .help("Toggle Sidebar")
-            }
-        }
         .onChange(of: viewModel.focusedItemID) { _, focusedID in
             guard focusedID != nil else { return }
             withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
@@ -318,7 +305,7 @@ struct ContentView: View {
                 }
             )
         case .settings:
-            SettingsView(manager: viewModel.psychoCopyManager)
+            SettingsView(manager: viewModel.psychoCopyManager, viewModel: viewModel)
         }
     }
     @ViewBuilder
@@ -367,9 +354,17 @@ struct ClipboardFeedView: View {
     var chainSelectedIDs: Binding<[UUID]>? = nil
     
     private var allItems: [ClipboardItem] { viewModel.activeItems }
-    @State private var searchQuery: String = ""
-    @State private var selectedDateRange: String = "All Time"
-    @State private var showDatePicker: Bool = false
+    @State private var search = ClipboardSearchQuery()
+    @State private var searchInputTask: Task<Void, Never>?
+    @State private var showsAdvancedSearch = false
+    @State private var advancedApps: Set<String> = []
+    @State private var advancedCategories: Set<ContentCategory> = []
+    @State private var advancedDateFilter: ClipboardDateFilter? = nil
+    @State private var customSelectedDate: Date? = nil
+    @State private var showsAppFilter = false
+    @State private var showsTypeFilter = false
+    @State private var showsDateFilter = false
+    @State private var isCustomCalendarViewActive = false
     @State private var selectedItemID: UUID? = nil
     @State private var selectedItemIDs: Set<UUID> = []
     @State private var draggingItemIDs: Set<UUID> = []
@@ -378,22 +373,35 @@ struct ClipboardFeedView: View {
     @State private var editingFolderName: String = ""
     @State private var folderToast: String?
     @State private var isGridView: Bool = true
+    @State private var shouldFocusSearch: Bool = false
     
     var layoutColumns: [GridItem] {
         if isGridView {
             return [
-                GridItem(.flexible(), spacing: 16),
-                GridItem(.flexible(), spacing: 16),
-                GridItem(.flexible(), spacing: 16)
+                // Fixed three-column grids make cards too narrow as soon as
+                // the sidebar or a smaller window reduces the available width.
+                // Let SwiftUI choose one, two, or three readable card columns.
+                // Compact tiles keep the visual rhythm of the original square
+                // layout. The adaptive grid adds/removes tiles as space changes
+                // instead of stretching two cards across a wide window.
+                GridItem(.adaptive(minimum: 210, maximum: 240), spacing: 16)
             ]
         } else {
             return [
-                GridItem(.flexible(), spacing: 16)
+                GridItem(.flexible(minimum: 0), spacing: 16)
             ]
         }
     }
     var filteredItems: [ClipboardItem] {
-        var result = allItems
+        var result = search.text.isEmpty ? allItems : viewModel.semanticSearchResults
+        result = result.filter(search.matches)
+        if !advancedApps.isEmpty { result = result.filter { advancedApps.contains($0.sourceAppName) } }
+        if !advancedCategories.isEmpty { result = result.filter { advancedCategories.contains(ContentCategory.detect(from: $0)) } }
+        if let advancedDateFilter {
+            result = result.filter { advancedDateFilter.contains($0.createdAt) }
+        } else if let customSelectedDate {
+            result = result.filter { Calendar.current.isDate($0.createdAt, inSameDayAs: customSelectedDate) }
+        }
         if showFavoritesOnly {
             result = result.filter { $0.isPinned }
         }
@@ -405,21 +413,6 @@ struct ClipboardFeedView: View {
         }
         if let type = preFilteredType {
             result = result.filter { $0.contentType == type }
-        }
-        if !searchQuery.isEmpty {
-            result = result.filter {
-                ($0.contentText?.localizedCaseInsensitiveContains(searchQuery) ?? false) ||
-                $0.sourceAppName.localizedCaseInsensitiveContains(searchQuery)
-            }
-        }
-        let cal = Calendar.current
-        switch selectedDateRange {
-        case "Today":        result = result.filter { cal.isDateInToday($0.createdAt) }
-        case "Yesterday":    result = result.filter { cal.isDateInYesterday($0.createdAt) }
-        case "Last 7 Days":
-            let cutoff = Date().addingTimeInterval(-7 * 86400)
-            result = result.filter { $0.createdAt >= cutoff }
-        default: break
         }
         return result
     }
@@ -481,30 +474,6 @@ struct ClipboardFeedView: View {
                         .foregroundColor(Theme.textPrimary)
                     Spacer()
                     HStack(spacing: 8) {
-                        Button(action: { showDatePicker = true }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "calendar")
-                                    .font(.system(size: 13, weight: .semibold))
-                                if selectedDateRange != "All Time" {
-                                    Text(selectedDateRange)
-                                        .font(.system(size: 10, weight: .semibold))
-                                }
-                            }
-                            .foregroundColor(selectedDateRange == "All Time" ? Theme.textTertiary : Theme.accent)
-                            .padding(.horizontal, 8)
-                            .frame(minWidth: 32, minHeight: 32)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(Color(hex: "#F6F6F6"))
-                                    .softInnerShadow(RoundedRectangle(cornerRadius: 10), darkShadow: Color(hex: "#A3B1C6").opacity(0.6), lightShadow: Color.white, spread: 0.15, radius: 6)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .help("Filter by date")
-                        .popover(isPresented: $showDatePicker, arrowEdge: .bottom) {
-                            datePickerPopover
-                        }
-                        
                         // Slider toggle for List/Grid
                         HStack(spacing: 0) {
                             Button(action: { withAnimation { isGridView = false } }) {
@@ -539,7 +508,18 @@ struct ClipboardFeedView: View {
                         )
                     }
                 }
-                SearchBarView(text: $searchQuery)
+                SearchBarView(query: $search, shouldFocus: $shouldFocusSearch, showsAdvanced: $showsAdvancedSearch, items: allItems, folders: viewModel.folders)
+                    .onChange(of: search.text) { _, query in scheduleTextSearch(query) }
+                if showsAdvancedSearch {
+                    advancedSearchControls.transition(.opacity.combined(with: .move(edge: .top)))
+                }
+                if viewModel.isSearching {
+                    HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Thinking…") }
+                        .font(.system(size: 11, weight: .medium)).foregroundColor(Theme.textTertiary)
+                        .padding(.top, 2)
+                } else if let error = viewModel.searchError, !search.text.isEmpty {
+                    Text(error).font(.system(size: 11, weight: .medium)).foregroundColor(.red.opacity(0.8)).padding(.top, 2)
+                }
                 if let selectedID = selectedItemID, let item = allItems.first(where: { $0.id == selectedID }), item.sourceAppName.lowercased() == "finder" {
                     HStack(spacing: 6) {
                         Image(systemName: "folder")
@@ -565,13 +545,14 @@ struct ClipboardFeedView: View {
             .padding(.horizontal, 20)
             .padding(.top, 20)
             .padding(.bottom, 12)
+            .zIndex(10)
             Divider().background(Theme.divider)
             ScrollView {
                 if viewModel.isLoading && allItems.isEmpty {
                     VStack(spacing: 12) {
                         Spacer().frame(height: 80)
                         ProgressView()
-                        Text("Loading from Supabase…")
+                        Text("Loading from iCloud…")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(Theme.textTertiary)
                     }
@@ -598,10 +579,10 @@ struct ClipboardFeedView: View {
                         Image(systemName: "doc.on.clipboard")
                             .font(.system(size: 32))
                             .foregroundColor(Theme.textTertiary)
-                        Text("Nothing copied yet")
+                        Text(search.isActive ? "Nothing found" : "Nothing copied yet")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(Theme.textTertiary)
-                        Text("Copy something and it'll show up here.")
+                        Text(search.isActive ? "Try different text or remove a filter." : "Copy something and it'll show up here.")
                             .font(.system(size: 11))
                             .foregroundColor(Theme.textTertiary)
                     }
@@ -611,15 +592,23 @@ struct ClipboardFeedView: View {
                         if shouldShowFolders {
                             folderSection
                         }
-                        if !todayItems.isEmpty     { gridSection("Today",     items: todayItems) }
-                        if !yesterdayItems.isEmpty { gridSection("Yesterday", items: yesterdayItems) }
-                        if !thisWeekItems.isEmpty  { gridSection("This Week", items: thisWeekItems) }
-                        if !olderItems.isEmpty     { gridSection("Older",     items: olderItems) }
+                        if search.isActive || !advancedApps.isEmpty || !advancedCategories.isEmpty {
+                            gridSection("Results", items: filteredItems)
+                        } else {
+                            if !todayItems.isEmpty     { gridSection("Today",     items: todayItems) }
+                            if !yesterdayItems.isEmpty { gridSection("Yesterday", items: yesterdayItems) }
+                            if !thisWeekItems.isEmpty  { gridSection("This Week", items: thisWeekItems) }
+                            if !olderItems.isEmpty     { gridSection("Older",     items: olderItems) }
+                            if selectedFolder == nil, !showFavoritesOnly, preFilteredApp == nil, preFilteredType == nil {
+                                loadMoreFooter
+                            }
+                        }
                     }
                     .padding(.horizontal, 20)
                     .padding(.vertical, 16)
                 }
             }
+            .zIndex(0)
         }
         .background(Theme.bg)
         .onAppear {
@@ -629,14 +618,308 @@ struct ClipboardFeedView: View {
             guard let focusedID else { return }
             selectedItemID = focusedID
         }
+        .onReceive(NotificationCenter.default.publisher(for: .focusClipboardSearch)) { _ in
+            shouldFocusSearch = true
+        }
+        .onDisappear { searchInputTask?.cancel() }
+    }
+
+    /// Autocomplete is calculated directly from the current input, while the
+    /// card grid waits a moment before touching the local index. This avoids
+    /// JSON decoding and a grid redraw for every individual key event.
+    private func scheduleTextSearch(_ query: String) {
+        searchInputTask?.cancel()
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            viewModel.search(query: "")
+            return
+        }
+        searchInputTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .milliseconds(120))
+                guard !Task.isCancelled else { return }
+                viewModel.search(query: query)
+            } catch is CancellationError {
+                // Expected while the user continues typing.
+            } catch {
+                // Sleeping cannot otherwise fail; leave the current results intact.
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var loadMoreFooter: some View {
+        if viewModel.hasMoreCachedItems || viewModel.isLoadingMoreItems {
+            HStack(spacing: 8) {
+                if viewModel.isLoadingMoreItems { ProgressView().controlSize(.small) }
+                Text(viewModel.isLoadingMoreItems ? "Loading older cards…" : "Load older cards")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Theme.textTertiary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 20)
+            .id(viewModel.items.last?.id)
+            .onAppear { viewModel.loadMoreItemsIfNeeded() }
+        }
     }
     private var shouldShowFolders: Bool {
         selectedFolder == nil &&
         preFilteredApp == nil &&
         preFilteredType == nil &&
         !showFavoritesOnly &&
-        searchQuery.isEmpty &&
-        selectedDateRange == "All Time"
+        !search.isActive &&
+        advancedApps.isEmpty &&
+        advancedCategories.isEmpty &&
+        advancedDateFilter == nil &&
+        customSelectedDate == nil
+    }
+    private var availableAdvancedApps: [(name: String, bundleID: String?)] {
+        let grouped = Dictionary(grouping: allItems, by: \ClipboardItem.sourceAppName)
+        return grouped.map { name, items in (name, items.compactMap(\.sourceAppBundleID).first) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+    private var searchableCategories: [ContentCategory] {
+        [.text, .url, .image, .file, .code, .color, .email, .phone, .richText, .video]
+    }
+    private var dateFilterTitle: String {
+        if let advancedDateFilter {
+            return "Date · \(advancedDateFilter.rawValue)"
+        } else if let customSelectedDate {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            return "Date · \(formatter.string(from: customSelectedDate))"
+        }
+        return "Date"
+    }
+    private var isDateFilterActive: Bool {
+        advancedDateFilter != nil || customSelectedDate != nil
+    }
+    private var advancedSearchControls: some View {
+        HStack(spacing: 8) {
+            advancedFilterButton(title: advancedApps.isEmpty ? "Apps" : "Apps · \(advancedApps.count)", icon: "app.fill", isActive: !advancedApps.isEmpty) {
+                showsAppFilter.toggle()
+            }
+            .popover(isPresented: $showsAppFilter, arrowEdge: .bottom) { appFilterPopover }
+            
+            advancedFilterButton(title: advancedCategories.isEmpty ? "Types" : "Types · \(advancedCategories.count)", icon: "square.grid.2x2.fill", isActive: !advancedCategories.isEmpty) {
+                showsTypeFilter.toggle()
+            }
+            .popover(isPresented: $showsTypeFilter, arrowEdge: .bottom) { typeFilterPopover }
+            
+            advancedFilterButton(title: dateFilterTitle, icon: "calendar", isActive: isDateFilterActive) {
+                showsDateFilter.toggle()
+            }
+            .popover(isPresented: $showsDateFilter, arrowEdge: .bottom) { dateFilterPopover }
+            
+            if !advancedApps.isEmpty || !advancedCategories.isEmpty || isDateFilterActive {
+                Button("Clear filters") {
+                    advancedApps.removeAll()
+                    advancedCategories.removeAll()
+                    advancedDateFilter = nil
+                    customSelectedDate = nil
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(Theme.textSecondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 2).padding(.top, -3)
+    }
+    private func advancedFilterButton(title: String, icon: String, isActive: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon).font(.system(size: 10, weight: .semibold))
+                Text(title).lineLimit(1)
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+            }
+            .font(.system(size: 11, weight: .semibold)).foregroundColor(isActive ? Theme.accent : Theme.textSecondary)
+            .padding(.horizontal, 10).frame(height: 28)
+            .background(Capsule().fill(isActive ? Theme.accent.opacity(0.09) : Theme.card))
+            .overlay(Capsule().stroke(isActive ? Theme.accent.opacity(0.45) : Theme.border, lineWidth: 0.75))
+        }.buttonStyle(.plain)
+    }
+    private var appFilterPopover: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            filterPopoverHeader("Filter by apps", selectedCount: advancedApps.count) { advancedApps.removeAll() }
+            Divider()
+            ScrollView {
+                VStack(spacing: 2) {
+                    ForEach(availableAdvancedApps, id: \.name) { app in
+                        let selected = advancedApps.contains(app.name)
+                        Button { if selected { advancedApps.remove(app.name) } else { advancedApps.insert(app.name) } } label: {
+                            HStack(spacing: 10) {
+                                if let id = app.bundleID, let icon = IconCache.shared.resolveAppIcon(bundleID: id) {
+                                    Image(nsImage: icon).resizable().interpolation(.high).frame(width: 18, height: 18)
+                                } else { Image(systemName: "app.fill").font(.system(size: 12, weight: .semibold)).frame(width: 18, height: 18) }
+                                Text(app.name).font(.system(size: 12, weight: .medium)).foregroundColor(Theme.textPrimary).lineLimit(1)
+                                Spacer(); checkmark(selected)
+                            }.padding(.horizontal, 10).frame(height: 34)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(selected ? Theme.accent.opacity(0.08) : Color.clear))
+                        }.buttonStyle(.plain)
+                    }
+                }.padding(6)
+            }.frame(height: min(CGFloat(availableAdvancedApps.count) * 34 + 12, 260))
+        }.frame(width: 270).background(Theme.bg)
+    }
+    private var typeFilterPopover: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            filterPopoverHeader("Filter by type", selectedCount: advancedCategories.count) { advancedCategories.removeAll() }
+            Divider()
+            VStack(spacing: 2) {
+                ForEach(searchableCategories, id: \.self) { category in
+                    let selected = advancedCategories.contains(category)
+                    Button { if selected { advancedCategories.remove(category) } else { advancedCategories.insert(category) } } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: ClipboardSearchToken.category(category).icon).font(.system(size: 12, weight: .semibold)).frame(width: 18)
+                            Text(category.searchFilterTitle).font(.system(size: 12, weight: .medium)).foregroundColor(Theme.textPrimary)
+                            Spacer(); checkmark(selected)
+                        }.padding(.horizontal, 10).frame(height: 34)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(selected ? Theme.accent.opacity(0.08) : Color.clear))
+                    }.buttonStyle(.plain)
+                }
+            }.padding(6)
+        }.frame(width: 240).background(Theme.bg)
+    }
+    private var primaryDateFilters: [ClipboardDateFilter] {
+        [.today, .yesterday, .last7Days, .thisMonth]
+    }
+    private var dateFilterPopover: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if isCustomCalendarViewActive {
+                HStack {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            isCustomCalendarViewActive = false
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 10, weight: .bold))
+                            Text("Back")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundColor(Theme.accent)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Spacer()
+                    
+                    Text("Select Date")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
+                    
+                    Spacer()
+                    
+                    if customSelectedDate != nil {
+                        Button("Clear") {
+                            customSelectedDate = nil
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Theme.accent)
+                    } else {
+                        Text("Clear")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.clear)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 40)
+                
+                Divider()
+                
+                SleekCalendarView(selectedDate: $customSelectedDate) { _ in
+                    advancedDateFilter = nil
+                }
+                .padding(8)
+            } else {
+                filterPopoverHeader("Filter by date", selectedCount: isDateFilterActive ? 1 : 0) {
+                    advancedDateFilter = nil
+                    customSelectedDate = nil
+                }
+                Divider()
+                
+                VStack(spacing: 3) {
+                    ForEach(primaryDateFilters) { filter in
+                        let selected = advancedDateFilter == filter && customSelectedDate == nil
+                        Button {
+                            if selected {
+                                advancedDateFilter = nil
+                            } else {
+                                advancedDateFilter = filter
+                                customSelectedDate = nil
+                            }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: filter.icon)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .frame(width: 18)
+                                    .foregroundColor(selected ? Theme.accent : Theme.textSecondary)
+                                Text(filter.rawValue)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(Theme.textPrimary)
+                                Spacer()
+                                checkmark(selected)
+                            }
+                            .padding(.horizontal, 10)
+                            .frame(height: 32)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(selected ? Theme.accent.opacity(0.08) : Color.clear))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    
+                    Divider().padding(.vertical, 4)
+                    
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            isCustomCalendarViewActive = true
+                        }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "calendar")
+                                .font(.system(size: 12, weight: .semibold))
+                                .frame(width: 18)
+                                .foregroundColor(customSelectedDate != nil ? Theme.accent : Theme.textSecondary)
+                            
+                            Text(customSelectedDate.map { date in
+                                let formatter = DateFormatter()
+                                formatter.dateStyle = .medium
+                                return formatter.string(from: date)
+                            } ?? "Custom Date…")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(customSelectedDate != nil ? Theme.accent : Theme.textPrimary)
+                            
+                            Spacer()
+                            
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(Theme.textTertiary)
+                        }
+                        .padding(.horizontal, 10)
+                        .frame(height: 34)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(customSelectedDate != nil ? Theme.accent.opacity(0.08) : Color.clear)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(6)
+            }
+        }
+        .frame(width: 250)
+        .background(Theme.bg)
+    }
+    private func filterPopoverHeader(_ title: String, selectedCount: Int, onClear: @escaping () -> Void) -> some View {
+        HStack {
+            Text(title).font(.system(size: 12, weight: .semibold)).foregroundColor(Theme.textPrimary)
+            Spacer()
+            if selectedCount > 0 { Button("Clear") { onClear() }.buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.accent) }
+        }.padding(.horizontal, 14).frame(height: 42)
+    }
+    private func checkmark(_ selected: Bool) -> some View {
+        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+            .font(.system(size: 15, weight: .semibold)).foregroundColor(selected ? Theme.accent : Theme.border)
     }
     private var folderSection: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -755,6 +1038,9 @@ struct ClipboardFeedView: View {
                         viewModel.copyToPasteboard(item)
                         onItemCopy(item)
                     },
+                    isAssetLoading: viewModel.assetLoadingIDs.contains(item.id),
+                    assetLoadError: viewModel.assetLoadError(for: item.id),
+                    onRetryAssetDownload: { viewModel.retryAssetDownload(for: item) },
                     onOpenOCRViewer: item.contentType == .image ? {
                         ImageTextViewerWindowManager.shared.open(item: item, viewModel: viewModel)
                     } : nil
@@ -771,11 +1057,11 @@ struct ClipboardFeedView: View {
                 } preview: {
                     dragPreview(for: item)
                 }
-            }
-        }
-        .onAppear {
-            if item.contentType == .image {
-                viewModel.loadLocalDataIfNeeded(for: item)
+                .onAppear {
+                    // Existing cards created before the thumbnail feature are
+                    // migrated automatically in a throttled background queue.
+                    viewModel.prepareImageThumbnailIfNeeded(for: item)
+                }
             }
         }
     }
@@ -825,35 +1111,6 @@ struct ClipboardFeedView: View {
         }
         return item.sourceAppName
     }
-    private var datePickerPopover: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            ForEach(["All Time", "Today", "Yesterday", "Last 7 Days"], id: \.self) { range in
-                Button(action: {
-                    selectedDateRange = range
-                    showDatePicker = false
-                }) {
-                    HStack {
-                        Text(range)
-                            .font(.system(size: 12))
-                            .foregroundColor(Theme.textPrimary)
-                        Spacer()
-                        if selectedDateRange == range {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundColor(Theme.accent)
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .frame(width: 140, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.vertical, 6)
-        .background(Theme.bg)
-    }
 }
 struct FolderCardView: View {
     let folder: ClipboardFolder
@@ -896,7 +1153,7 @@ struct FolderCardView: View {
             Button {
                 onBeginRename()
             } label: {
-                Image(systemName: "ellipsis.vertical")
+                Image(systemName: "ellipsis")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(Color(hex: "#3A3A3C"))
                     .frame(width: 24, height: 24)
@@ -911,24 +1168,10 @@ struct FolderCardView: View {
         .padding(.horizontal, 16)
         .frame(height: 56)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Theme.selection)
-                .softInnerShadow(
-                    RoundedRectangle(cornerRadius: 14),
-                    darkShadow: Color.black.opacity(isTargeted ? 0.25 : 0.15),
-                    lightShadow: Color.white.opacity(0.6),
-                    spread: 0.05,
-                    radius: 3
-                )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(isTargeted || confirmsDrop ? Theme.accent : Color.clear, lineWidth: isTargeted || confirmsDrop ? 1.5 : 0)
-        )
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.selection))
         .scaleEffect(isTargeted ? 1.08 : 1)
         .animation(.spring(response: 0.18, dampingFraction: 0.75), value: isTargeted)
-        .contentShape(Rectangle())
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onTapGesture {
             if !isEditing {
                 onOpen()
@@ -993,17 +1236,7 @@ struct NewFolderCardView: View {
             .padding(.horizontal, 16)
             .frame(height: 56)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(Theme.selection)
-                    .softInnerShadow(
-                        RoundedRectangle(cornerRadius: 14),
-                        darkShadow: Color.black.opacity(0.15),
-                        lightShadow: Color.white.opacity(0.6),
-                        spread: 0.05,
-                        radius: 3
-                    )
-            )
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.selection))
         }
         .buttonStyle(.plain)
     }
@@ -1236,6 +1469,124 @@ struct ChainNamingOverlay: View {
                         .padding(20)
                     }
                 }
+            }
+        }
+    }
+}
+struct SleekCalendarView: View {
+    @Binding var selectedDate: Date?
+    var onSelect: (Date) -> Void
+    
+    @State private var currentMonth: Date = Date()
+    private let calendar = Calendar.current
+    
+    private var monthYearString: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMMM yyyy"
+        return formatter.string(from: currentMonth)
+    }
+    
+    private var daysInMonth: [Date?] {
+        guard let monthInterval = calendar.dateInterval(of: .month, for: currentMonth) else {
+            return []
+        }
+        
+        let startWeekday = calendar.component(.weekday, from: monthInterval.start) // 1 = Sunday
+        var days: [Date?] = Array(repeating: nil, count: startWeekday - 1)
+        
+        var date = monthInterval.start
+        while date < monthInterval.end {
+            days.append(date)
+            guard let nextDate = calendar.date(byAdding: .day, value: 1, to: date) else { break }
+            date = nextDate
+        }
+        return days
+    }
+    
+    private let weekdaySymbols = ["S", "M", "T", "W", "T", "F", "S"]
+    
+    var body: some View {
+        VStack(spacing: 8) {
+            // Month Header with Nav Arrows
+            HStack {
+                Text(monthYearString)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(Theme.textPrimary)
+                
+                Spacer()
+                
+                Button {
+                    if let prevMonth = calendar.date(byAdding: .month, value: -1, to: currentMonth) {
+                        currentMonth = prevMonth
+                    }
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(Theme.textSecondary)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Color.black.opacity(0.04)))
+                }
+                .buttonStyle(.plain)
+                
+                Button {
+                    if let nextMonth = calendar.date(byAdding: .month, value: 1, to: currentMonth) {
+                        currentMonth = nextMonth
+                    }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(Theme.textSecondary)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Color.black.opacity(0.04)))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 4)
+            
+            // Weekday symbols
+            HStack(spacing: 0) {
+                ForEach(0..<7, id: \.self) { idx in
+                    Text(weekdaySymbols[idx])
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(Theme.textTertiary)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            .padding(.vertical, 2)
+            
+            // Days Grid
+            let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 7)
+            LazyVGrid(columns: columns, spacing: 3) {
+                ForEach(0..<daysInMonth.count, id: \.self) { index in
+                    if let dayDate = daysInMonth[index] {
+                        let dayNumber = calendar.component(.day, from: dayDate)
+                        let isSelected = selectedDate.map { calendar.isDate($0, inSameDayAs: dayDate) } ?? false
+                        let isToday = calendar.isDateInToday(dayDate)
+                        
+                        Button {
+                            selectedDate = dayDate
+                            onSelect(dayDate)
+                        } label: {
+                            Text("\(dayNumber)")
+                                .font(.system(size: 11, weight: isSelected ? .bold : (isToday ? .semibold : .regular)))
+                                .foregroundColor(isSelected ? .white : (isToday ? Theme.accent : Theme.textPrimary))
+                                .frame(width: 26, height: 26)
+                                .background(
+                                    Circle()
+                                        .fill(isSelected ? Theme.accent : (isToday ? Theme.accent.opacity(0.12) : Color.clear))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Color.clear.frame(width: 26, height: 26)
+                    }
+                }
+            }
+        }
+        .padding(4)
+        .onAppear {
+            if let selectedDate {
+                currentMonth = selectedDate
             }
         }
     }

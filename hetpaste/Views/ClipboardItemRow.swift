@@ -1,7 +1,9 @@
 import SwiftUI
 import AppKit
 import LinkPresentation
+import UniformTypeIdentifiers
 struct ClipboardItemRow: View {
+    private let collapsedCardHeight: CGFloat = 204
     let item: ClipboardItem
     var isSelected: Bool = false
     var isMostRecent: Bool = false
@@ -18,12 +20,15 @@ struct ClipboardItemRow: View {
     var onExpand: () -> Void = {}
     var onPrimaryTap: (() -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
+    var isAssetLoading: Bool = false
+    var assetLoadError: String? = nil
+    var onRetryAssetDownload: () -> Void = {}
     /// Opens the OCR live-text viewer. If nil falls back to QuickLook.
     var onOpenOCRViewer: (() -> Void)? = nil
     @State private var isHovered: Bool = false
     @State private var isCopyHovered: Bool = false
     @State private var isStarHovered: Bool = false
-    @State private var isExpandHovered: Bool = false
+    @State private var isTrashHovered: Bool = false
     private var headerIcon: NSImage? {
         if let bid = item.sourceAppBundleID, !bid.isEmpty {
             if let img = IconCache.shared.cachedAppIcon(bundleID: bid) {
@@ -102,11 +107,138 @@ struct ClipboardItemRow: View {
     private func revealFileInFinder() {
         FileAccessStore.shared.revealInFinder(for: item.id, fallback: item.originalFileURL)
     }
+    private func defaultFileExtension() -> String {
+        if let lang = item.detectedLanguage?.lowercased() {
+            switch lang {
+            case "swift": return "swift"
+            case "python", "py": return "py"
+            case "javascript", "js": return "js"
+            case "typescript", "ts": return "ts"
+            case "json": return "json"
+            case "html": return "html"
+            case "css": return "css"
+            case "sql": return "sql"
+            case "shell", "bash", "zsh", "sh": return "sh"
+            case "rust", "rs": return "rs"
+            case "go", "golang": return "go"
+            case "c++", "cpp": return "cpp"
+            case "c": return "c"
+            case "java": return "java"
+            case "ruby", "rb": return "rb"
+            case "php": return "php"
+            case "kotlin", "kt": return "kt"
+            case "markdown", "md": return "md"
+            default: break
+            }
+        }
+        if item.contentType == .richText, item.rtfData != nil {
+            return "rtf"
+        }
+        return "txt"
+    }
+    private func saveItemToDisk() {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.showsTagField = true
+        
+        let dateSuffix: String = {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd_HHmmss"
+            return formatter.string(from: item.createdAt)
+        }()
+        
+        switch item.contentType {
+        case .image:
+            panel.title = "Save Image As…"
+            panel.prompt = "Save"
+            let base = item.fileName?.components(separatedBy: ".").first ?? "Image_\(dateSuffix)"
+            panel.nameFieldStringValue = "\(base).png"
+            panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic]
+            
+            panel.begin { response in
+                guard response == .OK, let targetURL = panel.url else { return }
+                if let data = item.localData {
+                    try? data.write(to: targetURL, options: .atomic)
+                } else if let text = item.contentText, let data = Data(base64Encoded: text) {
+                    try? data.write(to: targetURL, options: .atomic)
+                }
+            }
+            
+        case .file:
+            panel.title = "Save File As…"
+            panel.prompt = "Save"
+            let defaultName = item.fileName ?? item.originalFileURL?.lastPathComponent ?? "File_\(dateSuffix)"
+            panel.nameFieldStringValue = defaultName
+            
+            panel.begin { response in
+                guard response == .OK, let targetURL = panel.url else { return }
+                if let sourceURL = resolvedFileURL ?? item.originalFileURL {
+                    try? FileManager.default.copyItem(at: sourceURL, to: targetURL)
+                } else if let data = item.localData {
+                    try? data.write(to: targetURL, options: .atomic)
+                }
+            }
+            
+        case .url:
+            panel.title = "Save Internet Shortcut As…"
+            panel.prompt = "Save"
+            let host = item.contentText.flatMap { URL(string: $0)?.host }?.replacingOccurrences(of: "www.", with: "") ?? "Link"
+            panel.nameFieldStringValue = "\(item.fileName ?? host).webloc"
+            panel.allowedContentTypes = [UTType(filenameExtension: "webloc") ?? .data]
+            
+            panel.begin { response in
+                guard response == .OK, let targetURL = panel.url, let urlString = item.contentText else { return }
+                let plist: [String: Any] = ["URL": urlString]
+                if let plistData = try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0) {
+                    try? plistData.write(to: targetURL, options: .atomic)
+                }
+            }
+            
+        case .text, .richText:
+            let ext = defaultFileExtension()
+            panel.title = "Save Snippet As…"
+            panel.prompt = "Save"
+            let name = item.fileName ?? "snippet_\(dateSuffix).\(ext)"
+            panel.nameFieldStringValue = name
+            
+            panel.begin { response in
+                guard response == .OK, let targetURL = panel.url else { return }
+                if ext == "rtf", let rtf = item.rtfData {
+                    try? rtf.write(to: targetURL, options: .atomic)
+                } else if let text = item.contentText, let data = text.data(using: .utf8) {
+                    try? data.write(to: targetURL, options: .atomic)
+                }
+            }
+            
+        case .video:
+            panel.title = "Save Video As…"
+            panel.prompt = "Save"
+            panel.nameFieldStringValue = item.fileName ?? "Video_\(dateSuffix).mov"
+            panel.begin { response in
+                guard response == .OK, let targetURL = panel.url else { return }
+                if let data = item.localData {
+                    try? data.write(to: targetURL, options: .atomic)
+                } else if let sourceURL = resolvedFileURL ?? item.originalFileURL {
+                    try? FileManager.default.copyItem(at: sourceURL, to: targetURL)
+                }
+            }
+        }
+    }
     @ViewBuilder
     private var fileActionsContextMenu: some View {
+        Button(action: onCopy) {
+            Label("Copy", systemImage: "doc.on.doc")
+        }
+        
+        Button(action: onToggleFavorite) {
+            Label(item.isPinned ? "Unfavorite" : "Favorite", systemImage: item.isPinned ? "star.fill" : "star")
+        }
+        
+        Divider()
+        
         if resolvedFileURL != nil {
             Button(action: openFileInDefaultApp) {
-                Label("Open", systemImage: "arrow.up.forward.app")
+                Label("Open in Default App", systemImage: "arrow.up.forward.app")
             }
             Button(action: quickViewFile) {
                 Label("Quick Look", systemImage: "eye")
@@ -119,6 +251,40 @@ struct ClipboardItemRow: View {
                 Label("Quick Look", systemImage: "eye")
             }
             .disabled(item.localData == nil)
+        } else if item.contentType == .url, let text = item.contentText, let url = URL(string: text) {
+            Button(action: { NSWorkspace.shared.open(url) }) {
+                Label("Open in Browser", systemImage: "safari")
+            }
+        }
+        
+        Button(action: saveItemToDisk) {
+            switch item.contentType {
+            case .image:
+                Label("Save Image As…", systemImage: "square.and.arrow.down")
+            case .file:
+                Label("Save File As…", systemImage: "square.and.arrow.down")
+            case .url:
+                Label("Save Shortcut As…", systemImage: "square.and.arrow.down")
+            case .text, .richText:
+                Label("Save Snippet As…", systemImage: "square.and.arrow.down")
+            case .video:
+                Label("Save Video As…", systemImage: "square.and.arrow.down")
+            }
+        }
+        
+        Divider()
+        
+        if isTrashMode {
+            Button(action: onRestore) {
+                Label("Restore", systemImage: "arrow.uturn.left")
+            }
+            Button(role: .destructive, action: onPermanentDelete) {
+                Label("Delete Permanently", systemImage: "trash")
+            }
+        } else {
+            Button(role: .destructive, action: onTrash) {
+                Label("Move to Trash", systemImage: "trash")
+            }
         }
     }
     private var borderColor: Color {
@@ -163,11 +329,9 @@ struct ClipboardItemRow: View {
             return item.fileSize.map(Formatters.fileSize) ?? "Image"
         }
         if item.contentType == .file || item.contentType == .video {
-            if let size = item.fileSize {
-                return Formatters.fileSize(size)
-            }
-            let ext = URL(fileURLWithPath: item.fileName ?? item.contentText ?? "").pathExtension.uppercased()
-            return ext.isEmpty ? pasteTypeLabel : ext
+            // Finder cards intentionally stay minimal: the icon and filename
+            // are enough to identify a file or folder.
+            return ""
         }
         if let text = item.contentText {
             if item.detectedLanguage != nil {
@@ -194,7 +358,7 @@ struct ClipboardItemRow: View {
             image: headerIcon,
             fallbackSystemName: appIconName,
             fallbackColor: appIconColor,
-            size: 48,
+            size: 52,
             elevation: .medium
         )
     }
@@ -218,6 +382,8 @@ struct ClipboardItemRow: View {
                             .stroke(Color.white.opacity(0.35), lineWidth: 1.5)
                     )
                     .padding(14)
+                    // Match the standard non-expanded grid-card proportions.
+                    .frame(height: isExpanded ? 388 : 170)
                     HStack {
                         Text("Colors")
                             .font(.system(size: 10, weight: .semibold))
@@ -266,23 +432,21 @@ struct ClipboardItemRow: View {
                 }
             }
         }
+        // Keep a card inside the width assigned by its grid column. Without a
+        // zero minimum, a wide image or attributed text can report its ideal
+        // width and visually spill into an adjacent column.
+        .frame(minWidth: 0, maxWidth: .infinity)
         .frame(maxWidth: isExpanded ? 800 : .infinity)
-        .frame(height: isExpanded ? 600 : nil)
+        .frame(height: isExpanded ? 600 : collapsedCardHeight)
         .background(Theme.neoBase)
-        .clipShape(RoundedRectangle(cornerRadius: 24))
-        // Subtle light grey border, or accent border if selected
+        // One shared outer silhouette for cards everywhere: main grid, strip,
+        // previews, and Trash. Internal media remains clipped by its own shape.
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 24)
-                .stroke(isSelected ? Theme.accent : Color(hex: "#E5E5E5"), lineWidth: isSelected ? 2.5 : 1)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(isSelected ? Theme.accent : Color.black.opacity(0.09), lineWidth: isSelected ? 1.5 : 1)
         )
-        // Neumorphic Soft Outer Shadow using the library
-        .softOuterShadow(
-            darkShadow: Color(hex: "#A3B1C6").opacity(0.35),
-            lightShadow: Color.white,
-            offset: 6,
-            radius: 8
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 24))
+        .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         // Double-tap MUST come before single-tap so SwiftUI waits for a possible 2nd tap
         .onTapGesture(count: 2) {
             if let onDoubleTap {
@@ -305,79 +469,173 @@ struct ClipboardItemRow: View {
     }
     private var pasteHeader: some View {
         let gradients = Theme.appHeaderGradient(for: item.sourceAppName, fallbackColor: pasteHeaderColor)
-        return HStack(alignment: .center, spacing: 12) {
+        return HStack(alignment: .center, spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(pasteSourceName)
-                    .font(.system(size: 15, weight: .bold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Text("\(pasteTypeLabel) · \(item.createdAt.relativeString())")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // Grid tiles can become narrow beside the sidebar. Give the text
+            // column a real zero-width compression limit so it truncates inside
+            // its own card instead of expanding the card's layout offscreen.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(-1)
             
             largeHeaderAppIcon
                 .allowsHitTesting(false)
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 12)
-        .padding(.vertical, 6)
+        .padding(.leading, 20)
+        .padding(.trailing, 16)
+        .padding(.vertical, 8)
+        .frame(minWidth: 0, maxWidth: .infinity)
         .background(
-            RoundedRectangle(cornerRadius: 18)
-                .fill(
-                    LinearGradient(
-                        colors: [gradients.0, gradients.1],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
+            LinearGradient(
+                colors: [gradients.0, gradients.1],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
         )
-        .padding([.horizontal, .top], 10) // inset relative to outer card
+    }
+    private var isRichMediaItem: Bool {
+        guard let text = item.contentText?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let url = URL(string: text),
+              let host = url.host?.lowercased() else {
+            return false
+        }
+        let path = url.path.lowercased()
+        return host.contains("music.apple.com") ||
+            host.contains("itunes.apple.com") ||
+            host.contains("podcasts.apple.com") ||
+            host.contains("spotify.com") ||
+            host.contains("soundcloud.com") ||
+            host.contains("tidal.com") ||
+            host.contains("bandcamp.com") ||
+            host.contains("books.apple.com") ||
+            host.contains("audible.com") ||
+            host.contains("youtube.com") ||
+            host.contains("youtu.be") ||
+            host.contains("vimeo.com") ||
+            path.contains("/album/") ||
+            path.contains("/track/") ||
+            path.contains("/playlist/") ||
+            path.contains("/podcast/") ||
+            path.contains("/episode/") ||
+            path.contains("/book/")
     }
     @ViewBuilder
     private var pasteContent: some View {
-        ZStack {
-            Theme.neoContent
-                .softInnerShadow(
-                    RoundedRectangle(cornerRadius: 16),
-                    darkShadow: Color(hex: "#A3B1C6").opacity(0.35),
-                    lightShadow: Color.white,
-                    spread: 0.04,
-                    radius: 4
-                )
-            switch item.contentType {
-            case .image:
-                PasteImagePreview(data: item.localData)
-            case .video:
-                MiniVideoMockup()
-                    .padding(12)
-            case .file:
-                pasteFilePreview
-            case .url:
+        Group {
+            if item.contentType == .url {
+                // All URL links render directly on the card background
+                // — no inner rounded container. LinkCardPreview owns its own layout.
                 pasteURLPreview
-            case .text, .richText:
-                pasteTextPreview
+                    .frame(height: isExpanded ? nil : 92)
+            } else {
+                ZStack {
+                    Theme.neoContent
+                        .softInnerShadow(
+                            RoundedRectangle(cornerRadius: 14),
+                            darkShadow: Color(hex: "#A3B1C6").opacity(0.35),
+                            lightShadow: Color.white,
+                            spread: 0.04,
+                            radius: 4
+                        )
+                    switch item.contentType {
+                    case .image:
+                        if item.localData != nil {
+                            PasteImagePreview(data: item.localData)
+                        } else if let thumbnail = ThumbnailCache.shared.data(for: item.id) {
+                            PasteImagePreview(data: thumbnail)
+                        } else {
+                            assetPlaceholder
+                        }
+                    case .video:
+                        MiniVideoMockup()
+                            .padding(10)
+                    case .file:
+                        pasteFilePreview
+                    case .url:
+                        pasteURLPreview
+                    case .text, .richText:
+                        pasteTextPreview
+                    }
+                }
+                .frame(height: isExpanded ? nil : 92)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .padding(.horizontal, 10)
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: isExpanded ? nil : 100)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .frame(minWidth: 0)
+        .padding(.top, 6)
+        .padding(.bottom, 6)
+    }
+
+    @ViewBuilder
+    private var assetPlaceholder: some View {
+        VStack(spacing: 7) {
+            if isAssetLoading {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Downloading from iCloud…")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+            } else if let assetLoadError {
+                Image(systemName: "exclamationmark.icloud")
+                    .foregroundColor(.orange)
+                Text(assetLoadError)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                Button("Retry", action: onRetryAssetDownload)
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 10, weight: .semibold))
+            } else if item.storagePath == nil {
+                Image(systemName: "exclamationmark.icloud")
+                    .foregroundColor(.orange)
+                Text("Original is unavailable")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                Text("It was not synced before its local cache was cleared.")
+                    .font(.system(size: 9))
+                    .foregroundColor(Theme.textTertiary)
+                    .multilineTextAlignment(.center)
+            } else {
+                Image(systemName: "icloud.and.arrow.down")
+                    .foregroundColor(Theme.textSecondary)
+                Text("Preview not stored locally")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                Button("Download image", action: onRetryAssetDownload)
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 10, weight: .semibold))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(10)
     }
     @ViewBuilder
     private var pasteTextPreview: some View {
         Group {
-            if isCodeContent {
-                RichTextCodeView(item: item, lineLimit: isExpanded ? nil : 5, fontSize: 12)
+            if item.contentType == .richText || isCodeContent {
+                RichTextCodeView(
+                    item: item,
+                    lineLimit: isExpanded ? nil : 5,
+                    fontSize: 12,
+                    textColor: NSColor(calibratedRed: 55 / 255, green: 53 / 255, blue: 47 / 255, alpha: 1)
+                )
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 10)
             } else {
                 Text(item.contentText ?? "")
                     .font(.system(size: 14, weight: .regular, design: .default))
@@ -385,8 +643,8 @@ struct ClipboardItemRow: View {
                     .lineLimit(isExpanded ? nil : 4)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 10)
             }
         }
         .frame(maxHeight: .infinity, alignment: .topLeading)
@@ -411,14 +669,16 @@ struct ClipboardItemRow: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(2)
-            Text(pasteMetadata)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(Theme.textSecondary)
-                .lineLimit(1)
+            if !pasteMetadata.isEmpty {
+                Text(pasteMetadata)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                    .lineLimit(1)
+            }
             }
             Spacer()
         }
-        .padding(14)
+        .padding(10)
     }
     @ViewBuilder
     private var pasteURLPreview: some View {
@@ -431,17 +691,21 @@ struct ClipboardItemRow: View {
                 .lineLimit(4)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(14)
+                .padding(10)
         }
     }
     private var pasteFooter: some View {
         HStack(spacing: 8) {
-            Text(pasteFooterMetadata)
-                .font(.system(size: 11, weight: .regular))
-                .foregroundColor(Theme.textTertiary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if !pasteFooterMetadata.isEmpty {
+                Text(pasteFooterMetadata)
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundColor(Theme.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Spacer(minLength: 0)
+            }
             syncBadge
             HStack(spacing: 10) {
                 if isTrashMode {
@@ -482,11 +746,21 @@ struct ClipboardItemRow: View {
                     )
                     .onHover { isStarHovered = $0 }
                     .help("Favorite")
+                    if stripMode {
+                        neoIconButton(
+                            systemName: "trash",
+                            isHovered: isTrashHovered,
+                            accentColor: .red,
+                            action: onTrash
+                        )
+                        .onHover { isTrashHovered = $0 }
+                        .help("Move to Trash")
+                    }
                 }
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.bottom, 12)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 8)
         .background(Theme.neoBase)
     }
 
@@ -647,7 +921,7 @@ struct ClipboardItemRow: View {
             }
         } else {
             Group {
-                if isCodeContent {
+                if item.contentType == .richText || isCodeContent {
                     VStack(alignment: .leading, spacing: 0) {
                         RichTextCodeView(item: item, lineLimit: isExpanded ? nil : 6)
                             .multilineTextAlignment(.leading)
@@ -833,8 +1107,7 @@ struct PasteImagePreview: View {
                     .resizable()
                     .renderingMode(.original)
                     .interpolation(.high)
-                    .aspectRatio(contentMode: .fit)
-                    .padding(9)
+                    .aspectRatio(contentMode: .fill)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Image(systemName: "photo")
@@ -852,67 +1125,154 @@ private struct LinkCardPreview: View {
     let accentColor: Color
     @State private var title: String?
     @State private var image: NSImage?
-    @State private var didRequestMetadata = false
+    @State private var iconImage: NSImage?
+    @State private var openGraphImage: NSImage?
+    @State private var faviconImage: NSImage?
+    @State private var didRequestMetadata: Bool
+
+    init(url: URL, host: String, accentColor: Color) {
+        self.url = url
+        self.host = host
+        self.accentColor = accentColor
+        let cached = LinkPreviewCache.shared.cachedMetadata(for: url)
+        _title = State(initialValue: cached?.title)
+        _openGraphImage = State(initialValue: cached?.image)
+        _iconImage = State(initialValue: cached?.icon)
+        _faviconImage = State(initialValue: IconCache.shared.cachedFavicon(host: host))
+        _didRequestMetadata = State(initialValue: cached != nil && (cached?.image != nil || cached?.title != nil))
+    }
     private var displayHost: String {
         host.replacingOccurrences(of: "www.", with: "")
     }
+    private var isCoverMediaLink: Bool {
+        let lower = host.lowercased()
+        let path = url.path.lowercased()
+        return lower.contains("music.apple.com") ||
+            lower.contains("itunes.apple.com") ||
+            lower.contains("podcasts.apple.com") ||
+            lower.contains("spotify.com") ||
+            lower.contains("soundcloud.com") ||
+            lower.contains("tidal.com") ||
+            lower.contains("bandcamp.com") ||
+            lower.contains("books.apple.com") ||
+            lower.contains("audible.com") ||
+            lower.contains("youtube.com") ||
+            lower.contains("youtu.be") ||
+            lower.contains("vimeo.com") ||
+            path.contains("/album/") ||
+            path.contains("/track/") ||
+            path.contains("/playlist/") ||
+            path.contains("/podcast/") ||
+            path.contains("/episode/") ||
+            path.contains("/book/")
+    }
+    private var isVideoMediaLink: Bool {
+        let lower = host.lowercased()
+        return lower.contains("youtube.com") ||
+            lower.contains("youtu.be") ||
+            lower.contains("vimeo.com") ||
+            lower.contains("netflix.com") ||
+            lower.contains("tv.apple.com")
+    }
+    private var visualImage: NSImage? {
+        if let openGraphImage { return openGraphImage }
+        if let image { return image }
+        if let iconImage, isSquare(iconImage) { return iconImage }
+        return nil
+    }
+    private func isSquare(_ image: NSImage) -> Bool {
+        guard image.size.width > 0, image.size.height > 0 else { return false }
+        let aspect = image.size.width / image.size.height
+        return (0.75...1.35).contains(aspect)
+    }
     var body: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                if let image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .renderingMode(.original)
-                        .interpolation(.high)
-                        .aspectRatio(contentMode: .fill)
-                } else {
-                    LinearGradient(
-                        colors: [accentColor.opacity(0.88), accentColor.opacity(0.48)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    HStack(spacing: 10) {
-                        favicon
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(displayHost)
-                                .font(.system(size: 13, weight: .bold))
-                                .foregroundColor(.white)
-                                .lineLimit(1)
-                            Text(url.absoluteString)
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundColor(.white.opacity(0.78))
-                                .lineLimit(2)
-                        }
-                    }
-                    .padding(12)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                }
+        Group {
+            if let artwork = visualImage {
+                // Any link with a preview image gets the hero layout — media, websites, all
+                linkHeroLayout(artwork: artwork)
+            } else {
+                // Unified clean fallback: same style for media and regular sites
+                linkFallback
             }
-            .frame(height: 60)
-            .clipped()
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title ?? displayHost)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(1)
-                Text(displayHost)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Theme.textSecondary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Theme.card)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: url) {
             await loadMetadataIfNeeded()
         }
     }
+    
+    @ViewBuilder
+    private func linkHeroLayout(artwork: NSImage) -> some View {
+        VStack(spacing: 5) {
+            Image(nsImage: artwork)
+                .resizable()
+                .renderingMode(.original)
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fill)
+                .frame(
+                    width: isVideoMediaLink ? 120 : 68,
+                    height: isVideoMediaLink ? 64 : 68
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            
+            Text(title ?? displayHost)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(Theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, 8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+    }
+    
+    @ViewBuilder
+    private var linkFallback: some View {
+        // One unified fallback for all link types — no image available yet
+        HStack(spacing: 12) {
+            // Favicon or service icon
+            Group {
+                if let icon = faviconImage ?? iconImage ?? IconCache.shared.cachedFavicon(host: host) {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .renderingMode(.original)
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 36, height: 36)
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                } else {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(accentColor.opacity(0.15))
+                        Image(systemName: "link")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(accentColor.opacity(0.7))
+                    }
+                    .frame(width: 36, height: 36)
+                }
+            }
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title ?? displayHost)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                Text(displayHost)
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundColor(Theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
     @ViewBuilder
     private var favicon: some View {
-        if let icon = IconCache.shared.cachedFavicon(host: host) {
+        if let icon = faviconImage ?? IconCache.shared.cachedFavicon(host: host) {
             Image(nsImage: icon)
                 .resizable()
                 .renderingMode(.original)
@@ -924,26 +1284,51 @@ private struct LinkCardPreview: View {
                 .foregroundColor(.white)
                 .frame(width: 28, height: 28)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.18)))
-                .onAppear {
-                    IconCache.shared.fetchFavicon(forHost: host) { _ in }
-                }
         }
     }
     @MainActor
     private func loadMetadataIfNeeded() async {
-        guard !didRequestMetadata else { return }
+        if didRequestMetadata && (visualImage != nil || title != nil) {
+            return
+        }
         didRequestMetadata = true
+        IconCache.shared.fetchFavicon(forHost: host) { icon in
+            self.faviconImage = icon
+        }
+        var loadedTitle: String? = title
+        var loadedImage: NSImage? = openGraphImage ?? image
+        var loadedIcon: NSImage? = iconImage
         do {
             let metadata = try await fetchMetadata(for: url)
-            title = metadata.title
-            if let provider = metadata.imageProvider ?? metadata.iconProvider,
-               provider.canLoadObject(ofClass: NSImage.self),
-               let loadedImage = try await loadImage(from: provider) {
-                image = loadedImage
+            if let t = metadata.title, !t.isEmpty {
+                loadedTitle = t
+                self.title = t
             }
-        } catch {
-            title = nil
+            if let provider = metadata.imageProvider,
+               provider.canLoadObject(ofClass: NSImage.self) {
+                if let loaded = try? await loadImage(from: provider) {
+                    self.image = loaded
+                    loadedImage = loaded
+                }
+            }
+            if let provider = metadata.iconProvider,
+               provider.canLoadObject(ofClass: NSImage.self) {
+                if let loaded = try? await loadImage(from: provider) {
+                    self.iconImage = loaded
+                    loadedIcon = loaded
+                }
+            }
+        } catch {}
+        if let previewImage = try? await fetchOpenGraphImage(for: url) {
+            self.openGraphImage = previewImage
+            loadedImage = previewImage
         }
+        LinkPreviewCache.shared.save(
+            title: loadedTitle ?? title,
+            image: loadedImage ?? visualImage,
+            icon: loadedIcon ?? iconImage,
+            for: url
+        )
     }
     private func fetchMetadata(for url: URL) async throws -> LPLinkMetadata {
         try await withCheckedThrowingContinuation { continuation in
@@ -966,6 +1351,36 @@ private struct LinkCardPreview: View {
                 }
             }
         }
+    }
+    private func fetchOpenGraphImage(for pageURL: URL) async throws -> NSImage? {
+        var request = URLRequest(url: pageURL, timeoutInterval: 12)
+        request.setValue("Mozilla/5.0 (Macintosh; Mac OS X) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
+        request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
+        let (htmlData, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              (200..<400).contains(http.statusCode) else { return nil }
+        let html = String(decoding: htmlData.prefix(1_000_000), as: UTF8.self)
+        guard let rawURL = openGraphImageURL(in: html),
+              let imageURL = URL(string: rawURL, relativeTo: pageURL)?.absoluteURL else { return nil }
+        let (imageData, imageResponse) = try await URLSession.shared.data(from: imageURL)
+        guard let imageHTTP = imageResponse as? HTTPURLResponse,
+              (200..<400).contains(imageHTTP.statusCode) else { return nil }
+        return NSImage(data: imageData)
+    }
+    private func openGraphImageURL(in html: String) -> String? {
+        let patterns = [
+            #"(?is)<meta\b[^>]*(?:property|name)\s*=\s*[\"'](?:og:image|twitter:image)[\"'][^>]*\bcontent\s*=\s*[\"']([^\"']+)[\"']"#,
+            #"(?is)<meta\b[^>]*\bcontent\s*=\s*[\"']([^\"']+)[\"'][^>]*(?:property|name)\s*=\s*[\"'](?:og:image|twitter:image)[\"']"#
+        ]
+        for pattern in patterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern),
+                  let match = expression.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+                  let range = Range(match.range(at: 1), in: html) else { continue }
+            return html[range]
+                .replacingOccurrences(of: "&amp;", with: "&")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
     }
 }
 struct MiniWindowMockup: View {
@@ -1118,7 +1533,7 @@ struct MiniFileMockup: View {
         ClipboardItemRow(
             item: ClipboardItem(
                 contentType: .text,
-                contentText: "git commit -m \"feat: add supabase integration\"",
+                contentText: "git commit -m \"feat: add cloud sync\"",
                 sourceAppName: "Terminal"
             ),
             isMostRecent: true

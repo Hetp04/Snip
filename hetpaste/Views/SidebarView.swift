@@ -64,14 +64,18 @@ struct SidebarView: View {
             }
             .buttonStyle(.plain)
             .onHover { isTrashHovered = $0 }
-            .onDrop(of: [.plainText], isTargeted: $isTrashDropTargeted) { providers in
-                for provider in providers {
-                    provider.loadItem(forTypeIdentifier: "public.plain-text", options: nil) { data, _ in
-                        guard let data = data as? Data,
-                              let uuidStr = String(data: data, encoding: .utf8),
-                              let uuid = UUID(uuidString: uuidStr) else { return }
-                        DispatchQueue.main.async {
-                            onDropToTrash?(uuid)
+            .onDrop(of: [UTType.hetpasteFolderItemIDs], isTargeted: $isTrashDropTargeted) { providers in
+                guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.hetpasteFolderItemIDs.identifier) }) else { return false }
+                
+                provider.loadDataRepresentation(forTypeIdentifier: UTType.hetpasteFolderItemIDs.identifier) { data, _ in
+                    guard let data = data,
+                          let raw = String(data: data, encoding: .utf8),
+                          !raw.isEmpty else { return }
+                          
+                    let ids = raw.split(separator: ",").compactMap { UUID(uuidString: String($0)) }
+                    DispatchQueue.main.async {
+                        for id in ids {
+                            onDropToTrash?(id)
                         }
                     }
                 }

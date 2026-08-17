@@ -40,6 +40,19 @@ final class IconCache {
         }
         return nil
     }
+
+    /// Warm the memory cache from the on-disk icon cache before a scrolling
+    /// view needs the images. This deliberately avoids resolving new icons or
+    /// drawing images here, so it is safe to run away from the UI thread.
+    func prewarmCachedAppIcons(bundleIDs: [String]) {
+        let uniqueBundleIDs = Array(Set(bundleIDs))
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            for bundleID in uniqueBundleIDs {
+                _ = self.cachedAppIcon(bundleID: bundleID)
+            }
+        }
+    }
     func saveAppIcon(_ image: NSImage, bundleID: String) {
         guard let data = pngData(of: image, targetSize: CGSize(width: 64, height: 64)) else { return }
         let url = appIconURL(for: bundleID)
@@ -117,6 +130,93 @@ final class IconCache {
             return img
         }
         return nil
+    }
+}
+final class LinkPreviewCache {
+    static let shared = LinkPreviewCache()
+    
+    final class CachedMetadata: NSObject {
+        let title: String?
+        let image: NSImage?
+        let icon: NSImage?
+        init(title: String?, image: NSImage?, icon: NSImage?) {
+            self.title = title
+            self.image = image
+            self.icon = icon
+        }
+    }
+    
+    private let mem = NSCache<NSString, CachedMetadata>()
+    private let fm = FileManager.default
+    
+    private init() {
+        mem.countLimit = 300
+    }
+    
+    private func linkPreviewDir() -> URL {
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("hetpaste/LinkPreviews", isDirectory: true)
+        if !fm.fileExists(atPath: dir.path) {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+    
+    private func sanitizeKey(_ urlString: String) -> String {
+        let allowed = CharacterSet.alphanumerics
+        return urlString.unicodeScalars.map { allowed.contains($0) ? String($0) : "_" }.joined()
+    }
+    
+    private func imageURL(for key: String) -> URL {
+        linkPreviewDir().appendingPathComponent(sanitizeKey(key)).appendingPathExtension("png")
+    }
+    
+    private func titleURL(for key: String) -> URL {
+        linkPreviewDir().appendingPathComponent(sanitizeKey(key)).appendingPathExtension("txt")
+    }
+    
+    func cachedMetadata(for url: URL) -> CachedMetadata? {
+        let key = url.absoluteString as NSString
+        if let hit = mem.object(forKey: key) {
+            return hit
+        }
+        let imgPath = imageURL(for: url.absoluteString)
+        let txtPath = titleURL(for: url.absoluteString)
+        var diskImage: NSImage?
+        var diskTitle: String?
+        if let imgData = try? Data(contentsOf: imgPath), let img = NSImage(data: imgData) {
+            diskImage = img
+        }
+        if let txtData = try? Data(contentsOf: txtPath), let txt = String(data: txtData, encoding: .utf8) {
+            diskTitle = txt
+        }
+        if diskImage != nil || diskTitle != nil {
+            let hit = CachedMetadata(title: diskTitle, image: diskImage, icon: nil)
+            mem.setObject(hit, forKey: key)
+            return hit
+        }
+        return nil
+    }
+    
+    func save(title: String?, image: NSImage?, icon: NSImage?, for url: URL) {
+        let key = url.absoluteString as NSString
+        let metadata = CachedMetadata(title: title, image: image, icon: icon)
+        mem.setObject(metadata, forKey: key)
+        
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let imgPath = self.imageURL(for: url.absoluteString)
+            let txtPath = self.titleURL(for: url.absoluteString)
+            if let image,
+               let tiff = image.tiffRepresentation,
+               let rep = NSBitmapImageRep(data: tiff),
+               let data = rep.representation(using: .png, properties: [:]) {
+                try? data.write(to: imgPath, options: .atomic)
+            }
+            if let title, let txtData = title.data(using: .utf8) {
+                try? txtData.write(to: txtPath, options: .atomic)
+            }
+        }
     }
 }
 private extension NSImage {

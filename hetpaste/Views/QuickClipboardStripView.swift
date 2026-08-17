@@ -1,4 +1,5 @@
 import Combine
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 private enum StripFolderEditor: Equatable {
@@ -23,7 +24,13 @@ final class QuickClipboardStripController: ObservableObject {
         draggingItemID = itemID
         isDraggingCard = true
         dragResetTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            // SwiftUI does not expose native-drag completion. Polling the
+            // button state lets us restore the source on the actual release,
+            // including a cancelled drag outside of our views.
+            while !Task.isCancelled && (NSEvent.pressedMouseButtons & 1) != 0 {
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
+            guard !Task.isCancelled else { return }
             self?.isDraggingCard = false
             self?.draggingItemID = nil
         }
@@ -95,7 +102,7 @@ struct QuickClipboardStripView: View {
     @State private var confirmedFolderID: UUID?
     @FocusState private var isFolderFieldFocused: Bool
     private var filteredItems: [ClipboardItem] {
-        var result = viewModel.items
+        var result = viewModel.activeItems
         if let folderID = controller.selectedFolderID {
             result = result.filter { $0.folderIDs.contains(folderID) }
         }
@@ -188,7 +195,7 @@ struct QuickClipboardStripView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("AddToWardrobeFromClipboard"))) { notification in
             if let itemID = notification.userInfo?["itemID"] as? UUID,
-               let item = viewModel.items.first(where: { $0.id == itemID }) {
+               let item = viewModel.activeItems.first(where: { $0.id == itemID }) {
                 Task {
                     await wardrobeViewModel.addFromClipboardItem(item)
                 }
@@ -209,6 +216,7 @@ struct QuickClipboardStripView: View {
             .onAppear {
                 let itemCount = controller.isWardrobeSelected ? wardrobeViewModel.items.count : filteredItems.count
                 controller.syncFocus(itemCount: itemCount)
+                prewarmStripResources()
             }
             .onChange(of: filteredItems.count) { _, newCount in
                 if !controller.isWardrobeSelected {
@@ -227,17 +235,29 @@ struct QuickClipboardStripView: View {
             .onChange(of: controller.selectedFolderID) { _, _ in
                 if !controller.isWardrobeSelected {
                     controller.syncFocus(itemCount: filteredItems.count)
+                    prewarmStripResources()
                 }
             }
             .onChange(of: controller.selectedContentType) { _, _ in
                 if !controller.isWardrobeSelected {
                     controller.syncFocus(itemCount: filteredItems.count)
+                    prewarmStripResources()
                 }
             }
             .onChange(of: controller.focusedIndex) { _, _ in
                 scrollToFocusedCard(using: proxy)
             }
         }
+    }
+    /// Load the resources most likely to enter the viewport next. The cards
+    /// themselves remain unchanged; this only removes icon disk I/O from the
+    /// middle of a horizontal trackpad swipe.
+    private func prewarmStripResources() {
+        let candidates = Array(filteredItems.prefix(18))
+        IconCache.shared.prewarmCachedAppIcons(
+            bundleIDs: candidates.compactMap(\.sourceAppBundleID)
+        )
+
     }
     private var stripCardsScroll: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -251,13 +271,24 @@ struct QuickClipboardStripView: View {
             .padding(.top, 14)
             .padding(.bottom, 16)
         }
+        // Dropping back in the strip is a cancelled move, not a removal. Consume
+        // the internal payload and immediately restore the source card.
+        .onDrop(of: [UTType.hetpasteFolderItemIDs], isTargeted: .constant(false)) { providers in
+            let isInternalCardDrag = providers.contains {
+                $0.hasItemConformingToTypeIdentifier(UTType.hetpasteFolderItemIDs.identifier)
+            }
+            if isInternalCardDrag {
+                controller.endCardDrag()
+            }
+            return isInternalCardDrag
+        }
     }
     private var folderBar: some View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
                 folderChip(
                     title: "All",
-                    count: viewModel.items.count,
+                    count: viewModel.activeItems.count,
                     isSelected: controller.selectedFolderID == nil,
                     action: {
                         controller.selectedFolderID = nil
@@ -428,7 +459,7 @@ struct QuickClipboardStripView: View {
             ClipboardItemRow(
                 item: item,
                 isSelected: controller.focusedIndex == index,
-                isMostRecent: item.id == viewModel.items.first?.id,
+                isMostRecent: item.id == viewModel.activeItems.first?.id,
                 stripMode: true,
                 onToggleFavorite: { viewModel.toggleFavorite(item) },
                 onRetrySync: { viewModel.retrySync(item) },
@@ -436,9 +467,10 @@ struct QuickClipboardStripView: View {
                     restore(item, closesStrip: false)
                 },
                 onDelete: {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        viewModel.deleteItem(item)
-                    }
+                    viewModel.moveToTrash(item)
+                },
+                onTrash: {
+                    viewModel.moveToTrash(item)
                 },
                 onExpand: {
                     onExpandFullApp(item)
@@ -452,20 +484,44 @@ struct QuickClipboardStripView: View {
             )
             .frame(width: cardWidth, height: 194)
             .contentShape(Rectangle())
-            .opacity(controller.draggingItemID == item.id ? 0.35 : 1)
-            .animation(.easeOut(duration: 0.18), value: controller.draggingItemID)
+            // Keep the card's slot while it is being dragged, but do not leave a
+            // faded duplicate behind. The native drag preview is the card the
+            // user is holding.
+            .opacity(controller.draggingItemID == item.id ? 0 : 1)
+            // Keep the source-card handoff and return in one smooth visual
+            // transition instead of a frame-by-frame snap.
+            .animation(.easeOut(duration: 0.16), value: controller.draggingItemID)
             .onDrag {
                 controller.beginCardDrag(itemID: item.id)
-                return viewModel.folderDragItemProvider(for: [item.id])
+                return viewModel.stripDragItemProvider(for: item)
             } preview: {
-                ClipboardItemRow(item: item, isSelected: false, stripMode: true)
-                    .frame(width: cardWidth, height: 194)
-                    .scaleEffect(0.5)
-                    .padding(18)
-                    .shadow(color: .black.opacity(0.28), radius: 14, y: 8)
+                // Use the same card, at the same size, as the strip. Do not add
+                // padding, shadows, scaling, or blur to the lifted card.
+                ClipboardItemRow(
+                    item: item,
+                    isSelected: controller.focusedIndex == index,
+                    isMostRecent: item.id == viewModel.activeItems.first?.id,
+                    stripMode: true,
+                    onToggleFavorite: {},
+                    onRetrySync: {},
+                    onCopy: {},
+                    onDelete: {},
+                    onExpand: {},
+                    onPrimaryTap: {},
+                    onDoubleTap: {}
+                )
+                    // The strip lays this card into a compact 194pt slot, while
+                    // the card itself has a taller natural render size. Keep
+                    // that natural height in the drag image so none of its
+                    // content gets cropped.
+                    .frame(width: cardWidth)
+                    // NSDragging renders the preview into its layout bounds;
+                    // preserve the row's own 24pt outer-card silhouette rather
+                    // than letting that snapshot become a rectangle.
+                    .clipShape(RoundedRectangle(cornerRadius: 24))
             }
             .onAppear {
-                if item.contentType == .image {
+                if item.contentType == .image || item.contentType == .file || item.contentType == .video {
                     viewModel.loadLocalDataIfNeeded(for: item)
                 }
             }
@@ -838,8 +894,8 @@ struct QuickClipboardStripView: View {
         }
     }
     private func scrollToFocusedCard(using proxy: ScrollViewProxy) {
-        guard viewModel.items.indices.contains(controller.focusedIndex) else { return }
-        let item = viewModel.items[controller.focusedIndex]
+        guard viewModel.activeItems.indices.contains(controller.focusedIndex) else { return }
+        let item = viewModel.activeItems[controller.focusedIndex]
         withAnimation(.easeInOut(duration: 0.18)) {
             proxy.scrollTo(item.id, anchor: .center)
         }

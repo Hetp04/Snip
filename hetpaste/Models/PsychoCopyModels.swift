@@ -73,7 +73,28 @@ struct PsychoCopySettings: Codable {
         key: "V",
         modifiers: [.command, .option]
     )
+    var searchHotkey: KeyCombination = KeyCombination(
+        key: "F",
+        modifiers: [.option]
+    )
     var showQueuePreview: Bool = true
     var maxQueuePreviewItems: Int = 10
-    var memoryWarningThreshold: Int64 = 100_000_000 
+    var memoryWarningThreshold: Int64 = 100_000_000
+
+    // MARK: - Persistence
+    private static let userDefaultsKey = "psychoCopySettings"
+
+    static func load() -> PsychoCopySettings {
+        guard let data = UserDefaults.standard.data(forKey: userDefaultsKey),
+              let decoded = try? JSONDecoder().decode(PsychoCopySettings.self, from: data) else {
+            return PsychoCopySettings()
+        }
+        return decoded
+    }
+
+    func save() {
+        if let data = try? JSONEncoder().encode(self) {
+            UserDefaults.standard.set(data, forKey: PsychoCopySettings.userDefaultsKey)
+        }
+    }
 }

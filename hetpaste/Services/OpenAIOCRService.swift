@@ -1,30 +1,28 @@
 import Foundation
 import AppKit
 
-// MARK: - OpenAI Vision OCR Fallback
+// MARK: - OpenRouter Vision OCR Fallback
 //
-// Uses GPT-4o-mini vision to extract text from images that Apple Vision
+// Uses a low-cost vision model through OpenRouter to extract text from images that Apple Vision
 // couldn't read (complex layouts, stylized text, mixed image+text, etc.)
-// Get your API key at: https://platform.openai.com/api-keys
-// Paste it into Config.xcconfig as OPENAI_API_KEY = sk-...
+// Paste OPENROUTER_API_KEY into Config.xcconfig.
 
 actor OpenAIOCRService {
     static let shared = OpenAIOCRService()
     private init() {}
 
-    // Read from Info.plist (injected by Config.xcconfig → INFOPLIST_KEY_OPENAI_API_KEY)
+    // Read from Info.plist (injected by Config.xcconfig).
     private var apiKey: String {
-        (Bundle.main.object(forInfoDictionaryKey: "OPENAI_API_KEY") as? String) ?? ""
+        (Bundle.main.object(forInfoDictionaryKey: "OPENROUTER_API_KEY") as? String) ?? ""
     }
 
     var isConfigured: Bool {
-        !apiKey.isEmpty && apiKey != "YOUR_OPENAI_API_KEY_HERE"
+        !apiKey.isEmpty && apiKey != "YOUR_OPENROUTER_API_KEY_HERE"
     }
 
-    // gpt-4o-mini: multimodal, cheap (~$0.001/image), great for OCR tasks
-    private let model = "gpt-4o-mini"
+    private let model = "google/gemini-2.5-flash-lite"
 
-    /// Extract text from an NSImage via OpenAI GPT-4o vision.
+    /// Extract text from an NSImage via OpenRouter vision.
     func extractText(from image: NSImage) async throws -> String {
         guard isConfigured else { throw OpenAIError.notConfigured }
         guard let tiff   = image.tiffRepresentation,
@@ -45,12 +43,12 @@ actor OpenAIOCRService {
     // MARK: - Private
 
     private func callOpenAI(imageData: Data, mimeType: String) async throws -> String {
-        let url = URL(string: "https://api.openai.com/v1/chat/completions")!
+        let url = URL(string: "https://openrouter.ai/api/v1/chat/completions")!
 
         let base64 = imageData.base64EncodedString()
         let dataURI = "data:\(mimeType);base64,\(base64)"
 
-        // OpenAI vision multimodal message format
+        // OpenRouter accepts the OpenAI-compatible vision message format.
         let body: [String: Any] = [
             "model": model,
             "max_tokens": 2000,
@@ -87,11 +85,11 @@ actor OpenAIOCRService {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw OpenAIError.networkError }
 
-        print("[OpenAI-OCR] HTTP \(http.statusCode) from \(model)")
+        print("[OpenRouter-OCR] HTTP \(http.statusCode) from \(model)")
 
         if http.statusCode != 200 {
             let body = String(data: data, encoding: .utf8) ?? "<unreadable>"
-            print("[OpenAI-OCR] Error body: \(body)")
+            print("[OpenRouter-OCR] Error body: \(body)")
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let error = json["error"] as? [String: Any],
                let message = error["message"] as? String {
@@ -108,12 +106,12 @@ actor OpenAIOCRService {
               let content = message["content"] as? String
         else {
             let raw = String(data: data, encoding: .utf8) ?? "<unreadable>"
-            print("[OpenAI-OCR] Parse failed. Raw: \(raw)")
+            print("[OpenRouter-OCR] Parse failed. Raw: \(raw)")
             throw OpenAIError.parseError
         }
 
         let result = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        print("[OpenAI-OCR] Extracted \(result.count) chars: \(result.prefix(80))...")
+        print("[OpenRouter-OCR] Extracted \(result.count) chars: \(result.prefix(80))...")
         return result
     }
 }
@@ -129,11 +127,11 @@ enum OpenAIError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .notConfigured:       return "OpenAI API key not set. Add OPENAI_API_KEY to Config.xcconfig."
-        case .imageEncodingFailed: return "Could not encode image for OpenAI."
-        case .networkError:        return "Network error contacting OpenAI."
-        case .apiError(let c, let m): return "OpenAI API error \(c): \(m)"
-        case .parseError:          return "Could not parse OpenAI response."
+        case .notConfigured:       return "OpenRouter API key not set. Add OPENROUTER_API_KEY to Config.xcconfig."
+        case .imageEncodingFailed: return "Could not encode image for OCR."
+        case .networkError:        return "Network error contacting OpenRouter."
+        case .apiError(let c, let m): return "OpenRouter API error \(c): \(m)"
+        case .parseError:          return "Could not parse OpenRouter response."
         }
     }
 }

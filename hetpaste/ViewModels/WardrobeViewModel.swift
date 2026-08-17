@@ -1,3 +1,4 @@
+import CloudKit
 import Foundation
 import SwiftUI
 import AppKit
@@ -9,10 +10,28 @@ final class WardrobeViewModel: ObservableObject {
     @Published var items: [WardrobeItem] = []
     @Published var isLoading = false
     @Published var loadError: String?
+    @Published private(set) var assetLoadingIDs: Set<UUID> = []
+    @Published private(set) var assetLoadErrors: [UUID: String] = [:]
     
-    private let repository = WardrobeRepository()
+    // See ClipboardHistoryViewModel: the test host is intentionally unsigned,
+    // so defer CloudKit creation until a real repository operation is needed.
+    private lazy var repository = WardrobeRepository()
+    private var pending = WardrobePendingStore.shared.load()
+    private var retryTask: Task<Void, Never>?
+    private let retryNotBeforeKey = "cloudkit.retry-not-before"
     
     init() {
+        updateDiagnostics()
+        guard !RuntimeEnvironment.isRunningUnitTests else { return }
+        NetworkReachability.shared.start()
+        NotificationCenter.default.addObserver(
+            forName: .hetpasteNetworkBecameAvailable,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, !self.isLoading else { return }
+            Task { await self.loadItems() }
+        }
         Task {
             await loadItems()
         }
@@ -26,7 +45,9 @@ final class WardrobeViewModel: ObservableObject {
         
         do {
             let fetchedItems = try await repository.fetchAll()
-            items = fetchedItems.map(hydrateFileReference)
+            let pendingIDs = Set(pending.saves.map(\.id))
+            items = (fetchedItems.filter { !pendingIDs.contains($0.id) } + pending.saves).map(hydrateFileReference)
+            retryPendingOperations()
         } catch {
             loadError = "Failed to load wardrobe: \(error.localizedDescription)"
             print("❌ Wardrobe load error: \(error)")
@@ -547,25 +568,44 @@ final class WardrobeViewModel: ObservableObject {
             savedLocalReference = true
         }
 
+        // Queue before I/O. This closes the crash window between accepting a
+        // drop and receiving CloudKit's save response.
+        queueSave(item)
+        if !items.contains(where: { $0.id == item.id }) { items.insert(item, at: 0) }
+        if let data = item.localData { AssetCache.shared.store(data, for: item.id) }
+
         do {
             let saved = try await repository.save(item)
-            items.insert(saved, at: 0)
+            pending.saves.removeAll { $0.id == item.id }
+            WardrobePendingStore.shared.save(pending)
+            updateDiagnostics()
+            if let index = items.firstIndex(where: { $0.id == item.id }) { items[index] = saved }
         } catch {
             if savedLocalReference {
-                FileAccessStore.shared.remove(for: item.id)
+                // Keep the bookmark: this save is queued and must survive a relaunch.
             }
-            throw error
+            scheduleRetryIfRequired(for: error)
         }
     }
     
     func deleteItem(_ item: WardrobeItem) {
+        // Durable tombstone first: a quit/crash after the optimistic UI update
+        // must not let this item reappear from CloudKit on the next launch.
+        pending.deletions.insert(item.id)
+        pending.saves.removeAll { $0.id == item.id }
+        WardrobePendingStore.shared.save(pending)
+        updateDiagnostics()
+        items.removeAll { $0.id == item.id }
         Task {
             do {
                 try await repository.delete(id: item.id)
-                items.removeAll { $0.id == item.id }
+                pending.deletions.remove(item.id)
+                WardrobePendingStore.shared.save(pending)
+                updateDiagnostics()
                 FileAccessStore.shared.remove(for: item.id)
             } catch {
-                loadError = "Failed to delete: \(error.localizedDescription)"
+                loadError = "Delete queued until iCloud is available."
+                scheduleRetryIfRequired(for: error)
             }
         }
     }
@@ -638,16 +678,90 @@ final class WardrobeViewModel: ObservableObject {
     
     func loadLocalDataIfNeeded(for item: WardrobeItem) {
         guard item.localData == nil, item.storagePath != nil else { return }
+        if let cached = AssetCache.shared.data(for: item.id) {
+            if let index = items.firstIndex(where: { $0.id == item.id }) { items[index].localData = cached }
+            return
+        }
+        guard !assetLoadingIDs.contains(item.id) else { return }
+        assetLoadingIDs.insert(item.id)
+        assetLoadErrors[item.id] = nil
         
         Task {
+            defer { assetLoadingIDs.remove(item.id) }
             do {
                 let data = try await repository.downloadData(for: item)
                 if let index = items.firstIndex(where: { $0.id == item.id }) {
                     items[index].localData = data
                 }
+                if let data { AssetCache.shared.store(data, for: item.id) }
             } catch {
+                assetLoadErrors[item.id] = "Couldn’t download this item."
+                scheduleRetryIfRequired(for: error)
                 print("Failed to load data for wardrobe item: \(error)")
             }
+        }
+    }
+
+    func assetLoadError(for itemID: UUID) -> String? { assetLoadErrors[itemID] }
+
+    func retryAssetDownload(for item: WardrobeItem) {
+        assetLoadErrors[item.id] = nil
+        loadLocalDataIfNeeded(for: item)
+    }
+
+    private func queueSave(_ item: WardrobeItem) {
+        pending.deletions.remove(item.id)
+        pending.saves.removeAll { $0.id == item.id }
+        pending.saves.append(item)
+        WardrobePendingStore.shared.save(pending)
+        updateDiagnostics()
+    }
+
+    private func retryPendingOperations() {
+        guard !pending.saves.isEmpty || !pending.deletions.isEmpty else { return }
+        if let retryNotBefore = UserDefaults.standard.object(forKey: retryNotBeforeKey) as? Date,
+           retryNotBefore > Date() {
+            scheduleRetry(at: retryNotBefore)
+            return
+        }
+        Task {
+            var updated = pending
+            for item in pending.saves {
+                do { _ = try await repository.save(item); updated.saves.removeAll { $0.id == item.id } }
+                catch { scheduleRetryIfRequired(for: error); break }
+            }
+            for id in pending.deletions {
+                do { try await repository.delete(id: id); updated.deletions.remove(id) }
+                catch { scheduleRetryIfRequired(for: error); break }
+            }
+            pending = updated
+            WardrobePendingStore.shared.save(updated)
+            updateDiagnostics()
+        }
+    }
+
+    private func updateDiagnostics() {
+        CloudSyncDiagnostics.shared.updateWardrobeQueueCount(pending.saves.count + pending.deletions.count)
+    }
+
+    private func scheduleRetryIfRequired(for error: Error) {
+        CloudSyncDiagnostics.shared.recordFailure(error)
+        guard let cloudError = error as? CKError,
+              let seconds = (cloudError as NSError).userInfo[CKErrorRetryAfterKey] as? NSNumber
+        else { return }
+        let retryAt = Date().addingTimeInterval(seconds.doubleValue)
+        UserDefaults.standard.set(retryAt, forKey: retryNotBeforeKey)
+        scheduleRetry(at: retryAt)
+    }
+
+    private func scheduleRetry(at date: Date) {
+        retryTask?.cancel()
+        retryTask = Task { [weak self] in
+            let delay = max(0, date.timeIntervalSinceNow)
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            UserDefaults.standard.removeObject(forKey: self.retryNotBeforeKey)
+            self.retryPendingOperations()
         }
     }
 }

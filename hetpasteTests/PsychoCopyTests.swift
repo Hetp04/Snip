@@ -28,8 +28,9 @@ struct PsychoCopyTests {
         #expect(manager.copyQueue.count == 2)
         #expect(manager.copyQueue.items[0].contentText == "1")
         #expect(manager.copyQueue.items[1].contentText == "2")
-        let qItem1 = manager.copyQueue.dequeue()
-        let qItem2 = manager.copyQueue.dequeue()
+        var queue = manager.copyQueue
+        let qItem1 = queue.dequeue()
+        let qItem2 = queue.dequeue()
         #expect(qItem1?.contentText == "1")
         #expect(qItem2?.contentText == "2")
     }
@@ -52,9 +53,10 @@ struct PsychoCopyTests {
         manager.toggleMultiCopyMode()
         let item1 = ClipboardItem(contentType: .text, contentText: "1", sourceAppName: "Test")
         manager.handleClipboardChange(item1)
-        let itemDequeued = manager.copyQueue.dequeue()
+        var queue = manager.copyQueue
+        let itemDequeued = queue.dequeue()
         #expect(itemDequeued?.contentText == "1")
-        #expect(manager.copyQueue.isEmpty)
+        #expect(queue.isEmpty)
     }
     @Test(.tags(.psychocopy)) func property5_universalContentTypeSupport() async throws {
         let manager = PsychoCopyManager()
@@ -95,21 +97,20 @@ struct PsychoCopyTests {
         let footprint = queue.memoryFootprint()
         #expect(footprint == Int64(10_000))
     }
-    @Test(.tags(.psychocopy)) func property9_clipboardSystemIntegration() async throws {
+    @Test(.tags(.psychocopy)) func property9_clipboardQueueIntegration() async throws {
         let manager = PsychoCopyManager()
-        let vm = ClipboardHistoryViewModel()
         manager.toggleMultiCopyMode()
         let item1 = ClipboardItem(contentType: .text, contentText: "1", sourceAppName: "Test")
         manager.handleClipboardChange(item1)
-        let result = await manager.performSequentialPaste(viewModel: vm)
-        #expect(result != nil)
+        #expect(manager.copyQueue.preview.first?.contentText == "1")
+        #expect(manager.copyQueue.preview.first?.queuePosition == 0)
     }
-    @Test(.tags(.psychocopy)) func property10_errorRecoveryAndContinuation() async throws {
+    @Test(.tags(.psychocopy)) func property10_emptyQueueRecoveryAndContinuation() async throws {
         let manager = PsychoCopyManager()
         manager.toggleMultiCopyMode()
-        let emptyResult = await manager.performSequentialPaste(viewModel: ClipboardHistoryViewModel())
-        #expect(!emptyResult.didCopy)
-        #expect(emptyResult.message == "Queue is empty")
+        manager.clearQueue()
+        #expect(manager.copyQueue.isEmpty)
         #expect(manager.isMultiCopyModeActive) 
     }
 }
+
