@@ -60,6 +60,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
     private var pendingChainDeletionIDs: Set<UUID> = []
     private var retryTask: Task<Void, Never>?
     private var metadataPersistenceTask: Task<Void, Never>?
+    private var followUpRemoteSyncRequested = false
     private var clipboardCaptureStateCancellable: AnyCancellable?
     private let retryNotBeforeKey = "cloudkit.retry-not-before"
     private let initialPageSize = 80
@@ -232,6 +233,10 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
         if loadError == nil { cloudSyncState = .idle }
         isLoading = false
+        if followUpRemoteSyncRequested {
+            followUpRemoteSyncRequested = false
+            Task { await loadHistory() }
+        }
     }
 
     func syncNow() { Task { await loadHistory() } }
@@ -288,6 +293,13 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
     }
     func handleRemoteCloudChange() {
+        if isLoading {
+            // Do not start concurrent CloudKit fetches. Preserve the event so
+            // a tiny token-based catch-up runs immediately after the current
+            // merge completes.
+            followUpRemoteSyncRequested = true
+            return
+        }
         Task {
             await loadHistory()
         }

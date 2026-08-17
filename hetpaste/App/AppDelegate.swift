@@ -73,6 +73,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSApplication.didResignActiveNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidBecomeActive(_:)),
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
         psychoCopyModeObserver = NotificationCenter.default.addObserver(
             forName: PsychoCopyManager.modeChangedNotification,
             object: nil,
@@ -331,6 +337,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationDidResignActive(_ notification: Notification) {
         closeClipboardStrip()
+    }
+    @objc func applicationDidBecomeActive(_ notification: Notification) {
+        // Push notifications are deliberately treated as hints by CloudKit and
+        // can be delayed while a macOS user session is inactive. A token-based
+        // delta fetch on activation makes fast-user-switching (and returning to
+        // the app on a second Mac) converge without requiring Sync Now.
+        viewModel.handleRemoteCloudChange()
     }
     func applicationWillTerminate(_ notification: Notification) {
         viewModel.persistLibraryCache(immediately: true)
