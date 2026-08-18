@@ -50,14 +50,8 @@ final class ClipboardHistoryViewModel: ObservableObject {
     // never attempt to create a CloudKit container.
     private lazy var service = ClipboardService()
     private lazy var repository = ClipboardRepository()
-    private var pendingFolderIDs: Set<UUID> = []
-    private var pendingItemIDs: Set<UUID> = []
     private var searchTask: Task<Void, Never>?
     private var activeSearchID = UUID()
-    private var pendingDeletionIDs: Set<UUID> = []
-    private var pendingFolderDeletionIDs: Set<UUID> = []
-    private var pendingChainIDs: Set<UUID> = []
-    private var pendingChainDeletionIDs: Set<UUID> = []
     private var retryTask: Task<Void, Never>?
     private var metadataPersistenceTask: Task<Void, Never>?
     private var followUpRemoteSyncRequested = false
@@ -161,8 +155,6 @@ final class ClipboardHistoryViewModel: ObservableObject {
         guard !ids.isEmpty else { return }
         metadataPersistenceTask?.cancel()
         items.removeAll { ids.contains($0.id) }
-        pendingItemIDs.subtract(ids)
-        pendingDeletionIDs.subtract(ids)
         LibraryMetadataStore.shared.remove(items: ids)
         for id in ids {
             AssetCache.shared.remove(for: id)
@@ -178,12 +170,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
         folders = cached.folders
         chains = cached.chains
         chainItems = cached.chainItems
-        pendingItemIDs = cached.queues.pendingItemIDs
-        pendingFolderIDs = cached.queues.pendingFolderIDs
-        pendingDeletionIDs = cached.queues.pendingDeletionIDs
-        pendingFolderDeletionIDs = cached.queues.pendingFolderDeletionIDs
-        pendingChainIDs = cached.queues.pendingChainIDs
-        pendingChainDeletionIDs = cached.queues.pendingChainDeletionIDs
+        // Replaced by CKSyncEngine
         hasMoreCachedItems = cached.hasMoreItems
         hydrateVisibleFileReferences()
         updateDiagnostics()
@@ -209,21 +196,21 @@ final class ClipboardHistoryViewModel: ObservableObject {
             // CloudKit returns only records since the persisted zone token.
             // On a new device it streams the initial zone in server batches;
             // on every later launch it normally writes only a small delta.
-            _ = try await CloudKitManager.shared.consumeRemoteChanges(
-                onRecordsChanged: { LibraryMetadataStore.shared.applyRemoteRecords($0) },
-                onRecordsDeleted: { LibraryMetadataStore.shared.applyRemoteDeletions($0) },
-                onPageApplied: { [weak self] in
-                    // First-run imports can span months of data. Publish the
-                    // newest local page after every CloudKit batch instead of
-                    // making the user wait for the historical import to end.
-                    Task { @MainActor [weak self] in self?.reloadVisibleLibraryPage() }
-                }
-            )
-            refreshPendingQueuesFromStore()
+            // CloudKit Sync Engine Initialization
+            CloudKitManager.shared.onRecordsChanged = { records in
+                LibraryMetadataStore.shared.applyRemoteRecords(records)
+                Task { @MainActor [weak self] in self?.reloadVisibleLibraryPage() }
+            }
+            CloudKitManager.shared.onRecordsDeleted = { deletions in
+                LibraryMetadataStore.shared.applyRemoteDeletions(deletions)
+                Task { @MainActor [weak self] in self?.reloadVisibleLibraryPage() }
+            }
+            try await CloudKitManager.shared.start()
+            // Force an immediate sync on launch to catch up on offline changes
+            try? await CloudKitManager.shared.engine.fetchChanges()
             reloadVisibleLibraryPage()
             startEmbeddingBackfill()
             persistLibraryCache()
-            await retryQueuedChanges()
             // Resumable transfers retain their local source after a crash.
             // Only states whose source is gone are safe to reclaim here.
             await repository.cleanupAbandonedChunkTransfers()
@@ -247,10 +234,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
 
     private func reloadVisibleLibraryPage() {
         let local = LibraryMetadataStore.shared.loadInitial(itemLimit: initialPageSize)
-        let pendingVisibleItems = items.filter { pendingItemIDs.contains($0.id) }
-        var merged = Dictionary(uniqueKeysWithValues: local.items.map { ($0.id, $0) })
-        for item in pendingVisibleItems { merged[item.id] = item }
-        items = merged.values.sorted { $0.createdAt > $1.createdAt }
+        items = local.items
         folders = mergeFolders(local.folders)
         chains = local.chains
         chainItems = local.chainItems
@@ -259,13 +243,6 @@ final class ClipboardHistoryViewModel: ObservableObject {
     }
 
     private func refreshPendingQueuesFromStore() {
-        let queues = LibraryMetadataStore.shared.loadInitial(itemLimit: 0).queues
-        pendingItemIDs = queues.pendingItemIDs
-        pendingFolderIDs = queues.pendingFolderIDs
-        pendingDeletionIDs = queues.pendingDeletionIDs
-        pendingFolderDeletionIDs = queues.pendingFolderDeletionIDs
-        pendingChainIDs = queues.pendingChainIDs
-        pendingChainDeletionIDs = queues.pendingChainDeletionIDs
     }
 
     /// Appends one bounded metadata page from the local index. CloudKit is not
@@ -342,7 +319,6 @@ final class ClipboardHistoryViewModel: ObservableObject {
         items.insert(item, at: 0)
         // Persist the intent before starting I/O. If the process exits between
         // capture and the CloudKit response, this card is retried on launch.
-        pendingItemIDs.insert(item.id)
         persistLibraryCache()
         Task(priority: item.localData?.count ?? 0 > 48 * 1024 * 1024 ? .utility : .userInitiated) { [weak self] in
             guard let self, await self.sync(item) else { return }
@@ -441,12 +417,10 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 $0.storagePath = saved.storagePath
             }
             AssetCache.shared.setProtected(false, for: item.id)
-            pendingItemIDs.remove(item.id)
             persistLibraryCache()
             return true
         } catch {
             updateItem(id: item.id, touchModifiedAt: false) { $0.syncStatus = .failed }
-            pendingItemIDs.insert(item.id)
             persistLibraryCache()
             cloudSyncState = isTransientCloudError(error) ? .offline : .failed(error.localizedDescription)
             print("❌ Clipboard iCloud save error: \(error.localizedDescription)")
@@ -995,13 +969,10 @@ final class ClipboardHistoryViewModel: ObservableObject {
     func deleteItem(_ item: ClipboardItem) {
         items.removeAll { $0.id == item.id }
         AssetCache.shared.remove(for: item.id)
-        pendingItemIDs.remove(item.id)
-        pendingDeletionIDs.insert(item.id)
         persistLibraryCache()
         Task {
             do {
                 try await repository.delete(id: item.id)
-                pendingDeletionIDs.remove(item.id)
                 persistLibraryCache()
             } catch {
                 print("Failed to delete item: \(error)")
@@ -1012,11 +983,10 @@ final class ClipboardHistoryViewModel: ObservableObject {
     func emptyTrash() {
         let toDelete = trashedItems
         items.removeAll { $0.isDeleted }
-        pendingDeletionIDs.formUnion(toDelete.map(\.id))
         persistLibraryCache()
         Task {
             for item in toDelete {
-                do { try await repository.delete(id: item.id); pendingDeletionIDs.remove(item.id) }
+                do { try await repository.delete(id: item.id) }
                 catch { handleCloudFailure(error) }
             }
             persistLibraryCache()
@@ -1028,21 +998,18 @@ final class ClipboardHistoryViewModel: ObservableObject {
         
         items.removeAll()
         folders.removeAll()
-        pendingDeletionIDs.formUnion(toDelete.map(\.id))
-        pendingFolderDeletionIDs.formUnion(foldersToDelete.map(\.id))
         persistLibraryCache()
         
         Task {
             // Delete sequentially to avoid CloudKit request throttling.
             // project when their history is large.
             for item in toDelete {
-                do { try await repository.delete(id: item.id); pendingDeletionIDs.remove(item.id) }
+                do { try await repository.delete(id: item.id) }
                 catch { handleCloudFailure(error) }
             }
             for folder in foldersToDelete {
                 do {
                     try await repository.deleteFolder(id: folder.id)
-                    pendingFolderDeletionIDs.remove(folder.id)
                 }
                 catch { handleCloudFailure(error) }
             }
@@ -1058,19 +1025,16 @@ final class ClipboardHistoryViewModel: ObservableObject {
     @discardableResult
     func createFolder(named name: String = "Untitled Folder") -> ClipboardFolder {
         let folder = ClipboardFolder(id: UUID(), name: name, createdAt: Date(), updatedAt: Date())
-        pendingFolderIDs.insert(folder.id)
         folders.append(folder)
         persistLibraryCache()
         Task {
             do {
                 let currentName = folders.first(where: { $0.id == folder.id })?.name ?? folder.name
                 try await repository.createFolder(id: folder.id, name: currentName, createdAt: folder.createdAt, updatedAt: folder.updatedAt)
-                pendingFolderIDs.remove(folder.id)
                 let remoteFolders = try await repository.fetchFolders()
                 folders = mergeFolders(remoteFolders)
                 loadError = nil
             } catch {
-                pendingFolderIDs.insert(folder.id)
                 persistLibraryCache()
                 loadError = folderErrorMessage(for: error, fallback: "Couldn't create folder")
                 handleCloudFailure(error)
@@ -1086,16 +1050,13 @@ final class ClipboardHistoryViewModel: ObservableObject {
             $0.updatedAt = Date()
         }
         // Renames are durable before the asynchronous write begins.
-        pendingFolderIDs.insert(folder.id)
         persistLibraryCache()
         Task {
             do {
                 try await repository.renameFolder(id: folder.id, name: newName)
-                pendingFolderIDs.remove(folder.id)
                 persistLibraryCache()
                 loadError = nil
             } catch {
-                pendingFolderIDs.insert(folder.id)
                 persistLibraryCache()
                 loadError = folderErrorMessage(for: error, fallback: "Couldn't rename folder")
                 handleCloudFailure(error)
@@ -1105,7 +1066,6 @@ final class ClipboardHistoryViewModel: ObservableObject {
     func deleteFolder(_ folder: ClipboardFolder) {
         let affectedItemIDs = items.filter { $0.folderIDs.contains(folder.id) }.map(\.id)
         folders.removeAll { $0.id == folder.id }
-        pendingFolderDeletionIDs.insert(folder.id)
         persistLibraryCache()
         for itemID in affectedItemIDs {
             updateItem(id: itemID) { $0.folderIDs.remove(folder.id) }
@@ -1113,7 +1073,6 @@ final class ClipboardHistoryViewModel: ObservableObject {
         Task {
             do {
                 try await repository.deleteFolder(id: folder.id)
-                pendingFolderDeletionIDs.remove(folder.id)
                 persistLibraryCache()
                 loadError = nil
             } catch {
@@ -1405,28 +1364,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
         persistLibraryCache()
     }
     func persistLibraryCache(immediately: Bool = false) {
-        let queues = LibraryMetadataStore.QueueState(
-            pendingItemIDs: pendingItemIDs,
-            pendingFolderIDs: pendingFolderIDs,
-            pendingDeletionIDs: pendingDeletionIDs,
-            pendingFolderDeletionIDs: pendingFolderDeletionIDs,
-            pendingChainIDs: pendingChainIDs,
-            pendingChainDeletionIDs: pendingChainDeletionIDs
-        )
-        // Queue state and its payload must be committed immediately. This keeps
-        // an offline mutation crash-safe before any CloudKit I/O begins.
-        LibraryMetadataStore.shared.remove(
-            items: pendingDeletionIDs,
-            folders: pendingFolderDeletionIDs,
-            chains: pendingChainDeletionIDs
-        )
-        LibraryMetadataStore.shared.upsert(
-            items: items.filter { pendingItemIDs.contains($0.id) },
-            folders: folders.filter { pendingFolderIDs.contains($0.id) },
-            chains: chains.filter { pendingChainIDs.contains($0.id) },
-            chainItems: chainItems.filter { pendingChainIDs.contains($0.key) }.values.flatMap { $0 },
-            queues: queues
-        )
+        let queues = LibraryMetadataStore.QueueState()
 
         metadataPersistenceTask?.cancel()
         let visibleItems = items
@@ -1454,10 +1392,8 @@ final class ClipboardHistoryViewModel: ObservableObject {
         updateDiagnostics()
     }
     private func queueItemForRetry(_ id: UUID) {
-        pendingItemIDs.insert(id)
         updateItem(id: id, touchModifiedAt: false) { $0.syncStatus = .pending }
         persistLibraryCache()
-        cloudSyncState = .offline
     }
 
     /// Saves the local intent before a metadata-only CloudKit mutation begins.
@@ -1470,7 +1406,6 @@ final class ClipboardHistoryViewModel: ObservableObject {
             guard let self else { return }
             do {
                 try await operation()
-                self.pendingItemIDs.remove(itemID)
                 self.updateItem(id: itemID, touchModifiedAt: false) { $0.syncStatus = .synced }
                 self.persistLibraryCache()
                 self.loadError = nil
@@ -1481,64 +1416,14 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
     }
     private func retryQueuedChanges() async {
-        // Deliberately serial: retrying every operation at once is the fastest
-        // route to CloudKit throttling after a long offline period. A failed
-        // operation stays on disk and stops this pass; the explicit server
-        // Retry-After delay is then scheduled by handleCloudFailure.
-        do {
-            for id in pendingDeletionIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
-                try await repository.delete(id: id)
-                pendingDeletionIDs.remove(id)
-                persistLibraryCache()
-            }
-            for id in pendingFolderDeletionIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
-                try await repository.deleteFolder(id: id)
-                pendingFolderDeletionIDs.remove(id)
-                persistLibraryCache()
-            }
-            for id in pendingChainDeletionIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
-                try await repository.deleteChain(id: id)
-                pendingChainDeletionIDs.remove(id)
-                persistLibraryCache()
-            }
-            for id in pendingChainIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
-                guard let chain = chains.first(where: { $0.id == id }) else {
-                    pendingChainIDs.remove(id)
-                    continue
-                }
-                try await repository.createChain(id: chain.id, name: chain.name, createdAt: chain.createdAt, updatedAt: chain.updatedAt)
-                try await repository.deleteChainItems(chainID: chain.id)
-                try await repository.addChainItems(chainItems[id] ?? [], chainID: chain.id)
-                pendingChainIDs.remove(id)
-                persistLibraryCache()
-            }
-            for id in pendingItemIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
-                guard let item = items.first(where: { $0.id == id }) else {
-                    pendingItemIDs.remove(id)
-                    continue
-                }
-                guard await sync(item) else { return }
-            }
-            for id in pendingFolderIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
-                guard let folder = folders.first(where: { $0.id == id }) else {
-                    pendingFolderIDs.remove(id)
-                    continue
-                }
-                try await repository.createFolder(id: folder.id, name: folder.name, createdAt: folder.createdAt, updatedAt: folder.updatedAt)
-                pendingFolderIDs.remove(id)
-                persistLibraryCache()
-            }
-        } catch {
-            cloudSyncState = isTransientCloudError(error) ? .offline : .failed(cloudErrorMessage(error))
-            handleCloudFailure(error)
-        }
+        // CKSyncEngine handles automatic background retry.
     }
     private func isTransientCloudError(_ error: Error) -> Bool {
         guard let cloudError = error as? CKError else { return false }
         return [.networkUnavailable, .networkFailure, .serviceUnavailable, .requestRateLimited, .zoneBusy].contains(cloudError.code)
     }
     private func updateDiagnostics() {
-        CloudSyncDiagnostics.shared.updateQueueCount(pendingItemIDs.count + pendingFolderIDs.count + pendingDeletionIDs.count + pendingFolderDeletionIDs.count + pendingChainIDs.count + pendingChainDeletionIDs.count)
+        CloudSyncDiagnostics.shared.updateQueueCount(0)
     }
     private func handleCloudFailure(_ error: Error) {
         CloudSyncDiagnostics.shared.recordFailure(error)
@@ -1560,11 +1445,13 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
     }
     private func mergeFolders(_ remoteFolders: [ClipboardFolder]) -> [ClipboardFolder] {
-        let pendingFolders = folders.filter { localFolder in
-            pendingFolderIDs.contains(localFolder.id) &&
-            !remoteFolders.contains(where: { $0.id == localFolder.id })
+        var merged = Dictionary(uniqueKeysWithValues: remoteFolders.map { ($0.id, $0) })
+        for localFolder in folders {
+            if merged[localFolder.id] == nil {
+                merged[localFolder.id] = localFolder
+            }
         }
-        return remoteFolders + pendingFolders
+        return merged.values.sorted { $0.createdAt > $1.createdAt }
     }
     private func folderErrorMessage(for error: Error, fallback: String) -> String {
         if let message = specificCloudErrorMessage(error) { return message }
@@ -1613,18 +1500,15 @@ final class ClipboardHistoryViewModel: ObservableObject {
         
         chains.append(chain)
         chainItems[chain.id] = chainItemsForThisChain
-        pendingChainIDs.insert(chain.id)
         persistLibraryCache()
         
         Task {
             do {
                 try await repository.createChain(id: chain.id, name: name, createdAt: chain.createdAt, updatedAt: chain.updatedAt)
                 try await repository.addChainItems(chainItemsForThisChain, chainID: chain.id)
-                pendingChainIDs.remove(chain.id)
                 persistLibraryCache()
             } catch {
                 print("Failed to create chain: \(error)")
-                self.pendingChainIDs.insert(chain.id)
                 self.persistLibraryCache()
                 self.handleCloudFailure(error)
             }
@@ -1635,17 +1519,15 @@ final class ClipboardHistoryViewModel: ObservableObject {
         guard let index = chains.firstIndex(where: { $0.id == chain.id }) else { return }
         chains[index].name = name
         chains[index].updatedAt = Date()
-        pendingChainIDs.insert(chain.id)
         persistLibraryCache()
         
         Task {
             do {
                 try await repository.renameChain(id: chain.id, name: name)
-                pendingChainIDs.remove(chain.id)
                 persistLibraryCache()
             } catch {
                 print("Failed to rename chain: \(error)")
-                self.pendingChainIDs.insert(chain.id); self.persistLibraryCache(); self.handleCloudFailure(error)
+                self.persistLibraryCache(); self.handleCloudFailure(error)
             }
         }
     }
@@ -1662,7 +1544,6 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
         
         chainItems[chain.id] = newChainItems
-        pendingChainIDs.insert(chain.id)
         persistLibraryCache()
         
         Task {
@@ -1674,11 +1555,10 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 if !newChainItems.isEmpty {
                     try await repository.addChainItems(newChainItems, chainID: chain.id)
                 }
-                pendingChainIDs.remove(chain.id)
                 persistLibraryCache()
             } catch {
                 print("Failed to update chain: \(error)")
-                self.pendingChainIDs.insert(chain.id); self.persistLibraryCache(); self.handleCloudFailure(error)
+                self.persistLibraryCache(); self.handleCloudFailure(error)
             }
         }
     }
@@ -1687,20 +1567,15 @@ final class ClipboardHistoryViewModel: ObservableObject {
         guard let index = chains.firstIndex(where: { $0.id == chain.id }) else { return }
         chains.remove(at: index)
         chainItems.removeValue(forKey: chain.id)
-        // A deletion is also an operation. Queue it first so a quit/crash
-        // cannot make the remote chain return on the next launch.
-        pendingChainIDs.remove(chain.id)
-        pendingChainDeletionIDs.insert(chain.id)
         persistLibraryCache()
         
         Task {
             do {
                 try await repository.deleteChain(id: chain.id)
-                pendingChainDeletionIDs.remove(chain.id)
                 persistLibraryCache()
             } catch {
                 print("Failed to delete chain: \(error)")
-                self.pendingChainDeletionIDs.insert(chain.id); self.persistLibraryCache(); self.handleCloudFailure(error)
+                self.persistLibraryCache(); self.handleCloudFailure(error)
             }
         }
     }
@@ -1712,18 +1587,16 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
         
         chainItems[chain.id] = newChainItems
-        pendingChainIDs.insert(chain.id)
         persistLibraryCache()
         
         Task {
             do {
                 try await repository.deleteChainItems(chainID: chain.id)
                 try await repository.addChainItems(newChainItems, chainID: chain.id)
-                pendingChainIDs.remove(chain.id)
                 persistLibraryCache()
             } catch {
                 print("Failed to update chain items: \(error)")
-                self.pendingChainIDs.insert(chain.id); self.persistLibraryCache(); self.handleCloudFailure(error)
+                self.persistLibraryCache(); self.handleCloudFailure(error)
             }
         }
     }
