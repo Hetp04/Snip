@@ -103,7 +103,7 @@ final class ClipboardService: ObservableObject {
             guard let self else { return }
             let snapshot = PasteboardSnapshot(from: NSPasteboard.general)
             let items = self.captureFromSnapshot(snapshot, sourceApp: sourceApp, captureRaw: shouldCaptureRaw)
-            for item in items {
+            for item in items.reversed() {
                 DispatchQueue.main.async {
                     guard !self.isCapturePaused, self.captureGeneration == generation else { return }
                     self.onNewItem?(item)
