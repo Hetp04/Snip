@@ -91,6 +91,20 @@ final class CloudKitManager: @unchecked Sendable, CKSyncEngineDelegate {
             delegate: self
         )
         self.engine = CKSyncEngine(config)
+        
+        let zone = CKRecordZone(zoneID: libraryZoneID)
+        engine.state.add(pendingDatabaseChanges: [.saveZone(zone)])
+        
+        let subscriptionID = "hetpaste-sync-engine-subscription"
+        do {
+            _ = try await database.subscription(for: subscriptionID)
+        } catch {
+            let subscription = CKDatabaseSubscription(subscriptionID: subscriptionID)
+            let notificationInfo = CKSubscription.NotificationInfo()
+            notificationInfo.shouldSendContentAvailable = true
+            subscription.notificationInfo = notificationInfo
+            try? await database.save(subscription)
+        }
     }
 
     func handleEvent(_ event: CKSyncEngine.Event, syncEngine: CKSyncEngine) async {
