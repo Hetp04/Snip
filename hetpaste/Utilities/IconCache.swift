@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import LinkPresentation
 final class IconCache {
     static let shared = IconCache()
     private let mem = NSCache<NSString, NSImage>()
@@ -217,6 +218,104 @@ final class LinkPreviewCache {
                 try? txtData.write(to: txtPath, options: .atomic)
             }
         }
+    }
+    
+    func fetchMetadataIfNeeded(for url: URL, host: String) async {
+        if cachedMetadata(for: url) != nil {
+            return
+        }
+        
+        var loadedTitle: String? = nil
+        var loadedImage: NSImage? = nil
+        var loadedIcon: NSImage? = nil
+        
+        do {
+            let metadata = try await fetchMetadata(for: url)
+            if let t = metadata.title, !t.isEmpty {
+                loadedTitle = t
+            }
+            if let provider = metadata.imageProvider,
+               provider.canLoadObject(ofClass: NSImage.self) {
+                if let loaded = try? await loadImage(from: provider) {
+                    loadedImage = loaded
+                }
+            }
+            if let provider = metadata.iconProvider,
+               provider.canLoadObject(ofClass: NSImage.self) {
+                if let loaded = try? await loadImage(from: provider) {
+                    loadedIcon = loaded
+                }
+            }
+        } catch {}
+        
+        if let previewImage = try? await fetchOpenGraphImage(for: url) {
+            loadedImage = previewImage
+        }
+        
+        if loadedTitle != nil || loadedImage != nil || loadedIcon != nil {
+            self.save(
+                title: loadedTitle,
+                image: loadedImage,
+                icon: loadedIcon,
+                for: url
+            )
+        }
+    }
+    
+    private func fetchMetadata(for url: URL) async throws -> LPLinkMetadata {
+        try await withCheckedThrowingContinuation { continuation in
+            LPMetadataProvider().startFetchingMetadata(for: url) { metadata, error in
+                if let metadata {
+                    continuation.resume(returning: metadata)
+                } else {
+                    continuation.resume(throwing: error ?? URLError(.badServerResponse))
+                }
+            }
+        }
+    }
+    
+    private func loadImage(from provider: NSItemProvider) async throws -> NSImage? {
+        try await withCheckedThrowingContinuation { continuation in
+            provider.loadObject(ofClass: NSImage.self) { object, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: object as? NSImage)
+                }
+            }
+        }
+    }
+    
+    private func fetchOpenGraphImage(for pageURL: URL) async throws -> NSImage? {
+        var request = URLRequest(url: pageURL, timeoutInterval: 12)
+        request.setValue("Mozilla/5.0 (Macintosh; Mac OS X) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
+        request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
+        let (htmlData, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              (200..<400).contains(http.statusCode) else { return nil }
+        let html = String(decoding: htmlData.prefix(1_000_000), as: UTF8.self)
+        guard let rawURL = openGraphImageURL(in: html),
+              let imageURL = URL(string: rawURL, relativeTo: pageURL)?.absoluteURL else { return nil }
+        let (imageData, imageResponse) = try await URLSession.shared.data(from: imageURL)
+        guard let imageHTTP = imageResponse as? HTTPURLResponse,
+              (200..<400).contains(imageHTTP.statusCode) else { return nil }
+        return NSImage(data: imageData)
+    }
+    
+    private func openGraphImageURL(in html: String) -> String? {
+        let patterns = [
+            #"(?is)<meta\b[^>]*(?:property|name)\s*=\s*[\"'](?:og:image|twitter:image)[\"'][^>]*\bcontent\s*=\s*[\"']([^\"']+)[\"']"#,
+            #"(?is)<meta\b[^>]*\bcontent\s*=\s*[\"']([^\"']+)[\"'][^>]*(?:property|name)\s*=\s*[\"'](?:og:image|twitter:image)[\"']"#
+        ]
+        for pattern in patterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern),
+                  let match = expression.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+                  let range = Range(match.range(at: 1), in: html) else { continue }
+            return html[range]
+                .replacingOccurrences(of: "&amp;", with: "&")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
     }
 }
 private extension NSImage {

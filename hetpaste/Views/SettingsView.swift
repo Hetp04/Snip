@@ -50,6 +50,7 @@ struct SettingsView: View {
     @ObservedObject var manager: PsychoCopyManager
     @ObservedObject var viewModel: ClipboardHistoryViewModel
     @ObservedObject private var privacy = PrivacySettings.shared
+    @StateObject private var settingsViewModel = SettingsViewModel()
     @State private var navPath = NavigationPath()
 
     var body: some View {
@@ -108,6 +109,19 @@ struct SettingsView: View {
             // ── Content ─────────────────────────────────────────────
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 16) {
+
+                    // Section 0: System settings
+                    SettingsCard {
+                        SettingsIconRow(
+                            symbol: "power.circle",
+                            title: "Launch at Login",
+                            description: "Start hetpaste silently in the background when you turn on your Mac. Required for seamless iCloud sync when the app is closed."
+                        ) {
+                            Toggle("", isOn: $settingsViewModel.launchAtLogin)
+                                .toggleStyle(MonochromeToggleStyle())
+                                .labelsHidden()
+                        }
+                    }
 
                     // Section 1: Sequential Paste
                     SettingsCard {

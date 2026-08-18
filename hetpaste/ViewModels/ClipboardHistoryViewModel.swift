@@ -62,7 +62,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
     private var metadataPersistenceTask: Task<Void, Never>?
     private var followUpRemoteSyncRequested = false
     private var clipboardCaptureStateCancellable: AnyCancellable?
-    private var backgroundSyncTimer: Timer?
+
     private let retryNotBeforeKey = "cloudkit.retry-not-before"
     private let initialPageSize = 80
     @Published private(set) var hasMoreCachedItems = false
@@ -112,15 +112,6 @@ final class ClipboardHistoryViewModel: ObservableObject {
         service.start()
         Task { await loadHistory() }
 
-        // Continuous automatic background sync: guarantees cards sync even when
-        // silent push notifications are dropped or delayed, and while the main window is closed.
-        let timer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.handleRemoteCloudChange()
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        self.backgroundSyncTimer = timer
     }
 
     func toggleClipboardCapturePaused() {
@@ -237,6 +228,8 @@ final class ClipboardHistoryViewModel: ObservableObject {
             // Only states whose source is gone are safe to reclaim here.
             await repository.cleanupAbandonedChunkTransfers()
             CloudSyncDiagnostics.shared.recordSuccess()
+            
+            eagerlyFetchAssetsAndMetadata()
         } catch {
             loadError = cloudErrorMessage(error)
             cloudSyncState = isTransientCloudError(error) ? .offline : .failed(cloudErrorMessage(error))
@@ -952,6 +945,27 @@ final class ClipboardHistoryViewModel: ObservableObject {
         assetLoadErrors[item.id] = nil
         loadLocalDataIfNeeded(for: item)
     }
+    
+    private func eagerlyFetchAssetsAndMetadata() {
+        Task { [weak self] in
+            guard let self else { return }
+            let recentItems = await MainActor.run { self.items }
+            
+            for item in recentItems {
+                if item.contentType == .image || item.contentType == .file || item.contentType == .video {
+                    if item.localData == nil && item.storagePath != nil {
+                        await MainActor.run { self.loadLocalDataIfNeeded(for: item) }
+                    }
+                } else if item.contentType == .url {
+                    if let text = item.contentText, let url = URL(string: text), let host = url.host {
+                        IconCache.shared.fetchFavicon(forHost: host) { _ in }
+                        await LinkPreviewCache.shared.fetchMetadataIfNeeded(for: url, host: host)
+                    }
+                }
+            }
+        }
+    }
+    
     func toggleFavorite(_ item: ClipboardItem) {
         let newValue = !item.isPinned
         updateItem(id: item.id) { $0.isPinned = newValue }

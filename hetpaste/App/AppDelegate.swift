@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Combine
+import CloudKit
 @MainActor
 private final class ClipboardStripPanel: NSPanel {
     var handleKeyEvent: ((NSEvent) -> Bool)?
@@ -389,10 +390,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     func application(_ application: NSApplication, didReceiveRemoteNotification userInfo: [String: Any]) {
-        // CloudKit notifications are hints only; reload through the normal
-        // merge path so coalesced notifications never lose library changes.
-        viewModel.handleRemoteCloudChange()
-        Task { await wardrobeViewModel.loadItems() }
+        if let dict = userInfo as? [String: NSObject],
+           let notification = CKNotification(fromRemoteNotificationDictionary: dict) {
+            if notification.subscriptionID == "clipboard-library-zone-changes" {
+                // CloudKit notifications are hints only; reload through the normal
+                // merge path so coalesced notifications never lose library changes.
+                viewModel.handleRemoteCloudChange()
+                Task { await wardrobeViewModel.loadItems() }
+            }
+        }
     }
     private func updateStatusBarIcon() {
         let isActive = viewModel.psychoCopyManager.isMultiCopyModeActive

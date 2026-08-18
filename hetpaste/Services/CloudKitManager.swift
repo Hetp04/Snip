@@ -332,7 +332,6 @@ final class CloudKitManager {
         let task = Task { [unowned self] in
             do { _ = try await database.modifyRecordZones(saving: [CKRecordZone(zoneID: libraryZoneID)], deleting: []) }
             catch let error as CKError where error.code == .serverRejectedRequest { /* zone already exists */ }
-            try await migrateDevelopmentDefaultZoneIfNeeded()
             try await installSubscription()
         }
         preparationTask = task
@@ -341,30 +340,7 @@ final class CloudKitManager {
         isPrepared = true
     }
 
-    private func migrateDevelopmentDefaultZoneIfNeeded() async throws {
-        let migratedKey = "cloudkit.default-zone-migrated.v1"
-        guard !UserDefaults.standard.bool(forKey: migratedKey) else { return }
-        for type in [CloudRecordType.clipboardItem, CloudRecordType.folder, CloudRecordType.chain, CloudRecordType.chainItem, CloudRecordType.wardrobeItem] {
-            let query = CKQuery(recordType: type, predicate: NSPredicate(value: true))
-            let legacy = try await database.records(matching: query, resultsLimit: CKQueryOperation.maximumResults).matchResults
-            for (_, result) in legacy {
-                let source = try result.get()
-                let destinationID = CKRecord.ID(recordName: source.recordID.recordName, zoneID: libraryZoneID)
-                if (try? await database.record(for: destinationID)) != nil { continue }
-                let destination = CKRecord(recordType: source.recordType, recordID: destinationID)
-                let temporaryAssetURLs = try copyFields(from: source, to: destination)
-                defer { removeTemporaryAssets(at: temporaryAssetURLs) }
-                // Old development builds stored embeddings as CloudKit Lists.
-                // Do not copy them: they can exceed list limits and regenerate
-                // safely after migration using the compact Data representation.
-                destination["rawEmbedding"] = nil
-                destination["embedding"] = nil
-                if destination["embeddingStatus"] != nil { destination["embeddingStatus"] = "pending" }
-                _ = try await database.save(destination)
-            }
-        }
-        UserDefaults.standard.set(true, forKey: migratedKey)
-    }
+
 
     private func installSubscription() async throws {
         let id = "clipboard-library-zone-changes"
