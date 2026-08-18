@@ -58,6 +58,8 @@ final class ClipboardHistoryViewModel: ObservableObject {
     private var pendingFolderDeletionIDs: Set<UUID> = []
     private var pendingChainIDs: Set<UUID> = []
     private var pendingChainDeletionIDs: Set<UUID> = []
+    private var pendingUploadQueue: [ClipboardItem] = []
+    private var isUploadQueueRunning = false
     private var thumbnailBackfillAttemptedIDs: Set<UUID> = []
     private var retryTask: Task<Void, Never>?
     private var metadataPersistenceTask: Task<Void, Never>?
@@ -93,8 +95,8 @@ final class ClipboardHistoryViewModel: ObservableObject {
             guard let self else { return }
             self.service.captureRawTypes = self.psychoCopyManager.isMultiCopyModeActive
         }
-        service.onNewItem = { [weak self] item in
-            Task { @MainActor in self?.handleNewItem(item) }
+        service.onNewItems = { [weak self] items in
+            Task { @MainActor in self?.handleNewItems(items) }
         }
         NetworkReachability.shared.start()
         NotificationCenter.default.addObserver(
@@ -362,35 +364,66 @@ final class ClipboardHistoryViewModel: ObservableObject {
             print("Failed to load chains: \(error)")
         }
     }
-    private func handleNewItem(_ item: ClipboardItem) {
-        if let first = items.first,
-           first.contentType == item.contentType,
-           first.contentText == item.contentText,
-           item.localData == nil {
-            return
+    private func handleNewItems(_ newItems: [ClipboardItem]) {
+        var itemsToInsert = [ClipboardItem]()
+        
+        for item in newItems {
+            if let first = items.first,
+               first.contentType == item.contentType,
+               first.contentText == item.contentText,
+               item.localData == nil {
+                continue
+            }
+            psychoCopyManager.handleClipboardChange(item)
+            if let data = item.localData {
+                AssetCache.shared.setProtected(true, for: item.id)
+                AssetCache.shared.store(data, for: item.id)
+                if item.contentType == .image { ThumbnailCache.shared.createAndStore(from: data, for: item.id) }
+            }
+            itemsToInsert.append(item)
+            pendingItemIDs.insert(item.id)
         }
-        psychoCopyManager.handleClipboardChange(item)
-        if let data = item.localData {
-            // Never allow Clear Cache to delete the only copy of a card while
-            // it is still pending or failed. This applies to every media size,
-            // not merely chunked transfers.
-            AssetCache.shared.setProtected(true, for: item.id)
-            AssetCache.shared.store(data, for: item.id)
-            if item.contentType == .image { ThumbnailCache.shared.createAndStore(from: data, for: item.id) }
-        }
-        items.insert(item, at: 0)
-        // Persist the intent before starting I/O. If the process exits between
-        // capture and the CloudKit response, this card is retried on launch.
-        pendingItemIDs.insert(item.id)
+        
+        guard !itemsToInsert.isEmpty else { return }
+        
+        // Single batch update for UI & Disk
+        items.insert(contentsOf: itemsToInsert, at: 0)
         persistLibraryCache()
-        Task(priority: item.localData?.count ?? 0 > 48 * 1024 * 1024 ? .utility : .userInitiated) { [weak self] in
-            guard let self, await self.sync(item) else { return }
-            self.indexInBackground(item)
+        
+        for item in itemsToInsert {
+            if item.contentType == .image, item.localData != nil {
+                updateItem(id: item.id) { $0.ocrStatus = .pending }
+                triggerOCRInBackground(for: item.id)
+            }
         }
-        // Run OCR in background immediately after image capture
-        if item.contentType == .image, item.localData != nil {
-            updateItem(id: item.id) { $0.ocrStatus = .pending }
-            triggerOCRInBackground(for: item.id)
+        
+        // Queue items for upload to prevent concurrently bombarding CloudKit
+        pendingUploadQueue.append(contentsOf: itemsToInsert)
+        processUploadQueue()
+    }
+    
+    private func processUploadQueue() {
+        guard !isUploadQueueRunning else { return }
+        isUploadQueueRunning = true
+        Task(priority: .utility) {
+            while !self.pendingUploadQueue.isEmpty {
+                // Upload batch sequentially but up to 3 at once
+                let batch = Array(self.pendingUploadQueue.prefix(3))
+                await MainActor.run {
+                    self.pendingUploadQueue.removeFirst(batch.count)
+                }
+                
+                await withTaskGroup(of: Void.self) { group in
+                    for item in batch {
+                        group.addTask {
+                            if await self.sync(item) {
+                                await MainActor.run { self.indexInBackground(item) }
+                            }
+                        }
+                    }
+                }
+            }
+            await MainActor.run { self.isUploadQueueRunning = false }
         }
     }
     /// Public: trigger OCR for an existing item (e.g. opened in viewer before OCR ran)

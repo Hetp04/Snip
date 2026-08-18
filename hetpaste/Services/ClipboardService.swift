@@ -9,7 +9,7 @@ final class ClipboardService: ObservableObject {
         let icon: NSImage?
         let observedAt: Date
     }
-    var onNewItem: ((ClipboardItem) -> Void)?
+    var onNewItems: (([ClipboardItem]) -> Void)?
     private var timer: Timer?
     private var lastChangeCount: Int = NSPasteboard.general.changeCount
     private var captureGeneration: UInt = 0
@@ -103,11 +103,9 @@ final class ClipboardService: ObservableObject {
             guard let self else { return }
             let snapshot = PasteboardSnapshot(from: NSPasteboard.general)
             let items = self.captureFromSnapshot(snapshot, sourceApp: sourceApp, captureRaw: shouldCaptureRaw)
-            for item in items.reversed() {
-                DispatchQueue.main.async {
-                    guard !self.isCapturePaused, self.captureGeneration == generation else { return }
-                    self.onNewItem?(item)
-                }
+            DispatchQueue.main.async {
+                guard !self.isCapturePaused, self.captureGeneration == generation else { return }
+                self.onNewItems?(items.reversed())
             }
         }
     }
