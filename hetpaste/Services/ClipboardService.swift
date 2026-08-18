@@ -101,7 +101,7 @@ final class ClipboardService: ObservableObject {
         let generation = captureGeneration
         captureQueue.async { [weak self] in
             guard let self else { return }
-            let snapshot = PasteboardSnapshot(from: NSPasteboard.general)
+            let snapshot = PasteboardSnapshot(from: NSPasteboard.general, captureRaw: shouldCaptureRaw)
             guard let item = self.captureFromSnapshot(snapshot, sourceApp: sourceApp, captureRaw: shouldCaptureRaw) else { return }
             DispatchQueue.main.async {
                 guard !self.isCapturePaused, self.captureGeneration == generation else { return }
@@ -113,17 +113,21 @@ final class ClipboardService: ObservableObject {
         let fileURLs: [URL]
         let pngData: Data?
         let tiffData: Data?
+        let jpegData: Data?
+        let heicData: Data?
         let rtfdData: Data?
         let rtfData: Data?
         let htmlData: Data?
         let plainString: String?
         let allTypes: [NSPasteboard.PasteboardType]
         let allRawData: [NSPasteboard.PasteboardType: Data]
-        init(from pasteboard: NSPasteboard) {
+        init(from pasteboard: NSPasteboard, captureRaw: Bool) {
             fileURLs = (pasteboard.readObjects(forClasses: [NSURL.self],
                 options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
             pngData  = pasteboard.data(forType: .png)
             tiffData = pasteboard.data(forType: .tiff)
+            jpegData = pasteboard.data(forType: .init("public.jpeg"))
+            heicData = pasteboard.data(forType: .init("public.heic"))
             rtfdData = pasteboard.data(forType: .rtfd)
             rtfData  = pasteboard.data(forType: .rtf)
             htmlData = pasteboard.data(forType: .html)
@@ -131,7 +135,9 @@ final class ClipboardService: ObservableObject {
             let types = pasteboard.types ?? []
             allTypes = types
             var raw: [NSPasteboard.PasteboardType: Data] = [:]
-            for t in types { if let d = pasteboard.data(forType: t) { raw[t] = d } }
+            if captureRaw {
+                for t in types { if let d = pasteboard.data(forType: t) { raw[t] = d } }
+            }
             allRawData = raw
         }
     }
@@ -148,17 +154,17 @@ final class ClipboardService: ObservableObject {
         if let fileURL = snapshot.fileURLs.first {
             return captureFile(at: fileURL, appName: appName, bundleID: bundleID)
         }
-        if let imageData = resolvedImageData(png: snapshot.pngData, tiff: snapshot.tiffData) {
+        if let imageResolved = resolvedImageData(snapshot: snapshot) {
             var item = ClipboardItem(
                 contentType: .image,
                 contentText: nil,
                 sourceAppName: appName,
                 sourceAppBundleID: bundleID,
                 syncStatus: .pending,
-                fileName: "image-\(Int(Date().timeIntervalSince1970)).png",
-                fileSize: Int64(imageData.count),
-                mimeType: "image/png",
-                localData: imageData
+                fileName: "image-\(Int(Date().timeIntervalSince1970)).\(imageResolved.ext)",
+                fileSize: Int64(imageResolved.data.count),
+                mimeType: imageResolved.mime,
+                localData: imageResolved.data
             )
             if captureRaw { item.rawPasteboardData = nonEmptyDict(snapshot.allRawData) }
             return item
@@ -311,11 +317,13 @@ final class ClipboardService: ObservableObject {
         let cleaned = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? text : cleaned
     }
-    private func resolvedImageData(png: Data?, tiff: Data?) -> Data? {
-        if let png { return png }
-        if let tiff,
+    private func resolvedImageData(snapshot: PasteboardSnapshot) -> (data: Data, ext: String, mime: String)? {
+        if let png = snapshot.pngData { return (png, "png", "image/png") }
+        if let jpeg = snapshot.jpegData { return (jpeg, "jpg", "image/jpeg") }
+        if let heic = snapshot.heicData { return (heic, "heic", "image/heic") }
+        if let tiff = snapshot.tiffData,
            let rep = NSBitmapImageRep(data: tiff),
-           let png = rep.representation(using: .png, properties: [:]) { return png }
+           let png = rep.representation(using: .png, properties: [:]) { return (png, "png", "image/png") }
         return nil
     }
     private func isMeaningfullyRichText(_ attributed: NSAttributedString, plainText: String?) -> Bool {
@@ -447,7 +455,9 @@ final class ClipboardService: ObservableObject {
         return .file
     }
     private func imageData(from pasteboard: NSPasteboard) -> Data? {
-        resolvedImageData(png: pasteboard.data(forType: .png), tiff: pasteboard.data(forType: .tiff))
+        let snapshot = PasteboardSnapshot(from: pasteboard, captureRaw: false)
+        return resolvedImageData(snapshot: snapshot)?.data
+
     }
     private func isURL(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
