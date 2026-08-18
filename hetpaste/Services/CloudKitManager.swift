@@ -121,6 +121,7 @@ final class CloudKitManager: @unchecked Sendable, CKSyncEngineDelegate {
         case .sentRecordZoneChanges(let sentEvent):
             for record in sentEvent.savedRecords {
                 PendingRecordStore.shared.remove(id: record.recordID)
+                cleanupTemporaryAssets(for: record)
             }
             for deletion in sentEvent.deletedRecordIDs {
                 PendingRecordStore.shared.remove(id: deletion)
@@ -135,7 +136,13 @@ final class CloudKitManager: @unchecked Sendable, CKSyncEngineDelegate {
                     if localUpdatedAt > serverUpdatedAt {
                         // Re-save local
                         engine.state.add(pendingRecordZoneChanges: [.saveRecord(local.recordID)])
+                    } else {
+                        PendingRecordStore.shared.remove(id: failed.record.recordID)
+                        cleanupTemporaryAssets(for: failed.record)
                     }
+                } else if !engine.state.pendingRecordZoneChanges.contains(.saveRecord(failed.record.recordID)) {
+                    PendingRecordStore.shared.remove(id: failed.record.recordID)
+                    cleanupTemporaryAssets(for: failed.record)
                 }
             }
         case .accountChange:
@@ -143,6 +150,16 @@ final class CloudKitManager: @unchecked Sendable, CKSyncEngineDelegate {
             UserDefaults.standard.removeObject(forKey: stateKey)
         default:
             break
+        }
+    }
+    
+    private func cleanupTemporaryAssets(for record: CKRecord) {
+        for key in record.allKeys() {
+            if let asset = record[key] as? CKAsset, let url = asset.fileURL {
+                if url.path.contains("hetpaste-cloudkit") {
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
         }
     }
     

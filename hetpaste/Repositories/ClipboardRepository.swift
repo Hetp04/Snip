@@ -85,7 +85,7 @@ final class ClipboardRepository {
                     record["storagePath"] = manifest.storagePath
                 }
             }
-            defer { if let temp { try? FileManager.default.removeItem(at: temp) } }
+            // Assets are now managed by CloudKitManager and deleted when CKSyncEngine finishes with them.
             cloud.save(record)
             savedRecord = record
         } catch {
@@ -273,7 +273,7 @@ final class ClipboardRepository {
                 let chunk = data.subdata(in: lower..<upper)
                 let name = Self.chunkRecordName(parentID: parentID, manifest: manifest, index: index)
                 let pair = try cloud.asset(from: chunk, name: name)
-                defer { try? FileManager.default.removeItem(at: pair.1) }
+                // Asset file cleanup is handled by CloudKitManager once the sync engine finishes.
                 let record = CKRecord(recordType: CloudRecordType.clipboardAssetChunk,
                                       recordID: cloud.recordID(type: CloudRecordType.clipboardAssetChunk, recordName: name))
                 record["parentID"] = parentID.uuidString
