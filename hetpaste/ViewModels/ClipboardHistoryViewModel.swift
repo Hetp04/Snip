@@ -58,9 +58,11 @@ final class ClipboardHistoryViewModel: ObservableObject {
     private var pendingFolderDeletionIDs: Set<UUID> = []
     private var pendingChainIDs: Set<UUID> = []
     private var pendingChainDeletionIDs: Set<UUID> = []
+    private var thumbnailBackfillAttemptedIDs: Set<UUID> = []
     private var retryTask: Task<Void, Never>?
     private var metadataPersistenceTask: Task<Void, Never>?
     private var automaticSyncTask: Task<Void, Never>?
+    private var coalescedSyncTask: Task<Void, Never>?
     private var followUpRemoteSyncRequested = false
     private var clipboardCaptureStateCancellable: AnyCancellable?
 
@@ -100,11 +102,11 @@ final class ClipboardHistoryViewModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self, !self.isLoading else { return }
+            guard let self else { return }
             // CloudKit's explicit Retry-After window is still respected by
             // loadHistory; this only retries immediately for ordinary loss of
             // connectivity when the path comes back.
-            Task { await self.loadHistory() }
+            Task { @MainActor in self.handleRemoteCloudChange() }
         }
         isClipboardCapturePaused = service.isCapturePaused
         clipboardCaptureStateCancellable = service.$isCapturePaused
@@ -113,12 +115,13 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 self?.isClipboardCapturePaused = isPaused
             }
         service.start()
-        Task { await loadHistory() }
+        handleRemoteCloudChange()
         startAutomaticSyncLoop()
     }
 
     deinit {
         automaticSyncTask?.cancel()
+        coalescedSyncTask?.cancel()
         retryTask?.cancel()
         metadataPersistenceTask?.cancel()
     }
@@ -267,16 +270,12 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
         if loadError == nil { cloudSyncState = .idle }
         isLoading = false
-        if followUpRemoteSyncRequested {
-            followUpRemoteSyncRequested = false
-            Task { await loadHistory() }
-        }
     }
 
     func syncNow() {
         // Explicit user intent may bypass a previously scheduled backoff.
         UserDefaults.standard.removeObject(forKey: retryNotBeforeKey)
-        Task { await loadHistory() }
+        handleRemoteCloudChange()
     }
 
     private func reloadVisibleLibraryPage() {
@@ -331,15 +330,21 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
     }
     func handleRemoteCloudChange() {
-        if isLoading {
+        if isLoading || coalescedSyncTask != nil {
             // Do not start concurrent CloudKit fetches. Preserve the event so
             // a tiny token-based catch-up runs immediately after the current
             // merge completes.
             followUpRemoteSyncRequested = true
             return
         }
-        Task {
-            await loadHistory()
+        coalescedSyncTask = Task { [weak self] in
+            guard let self else { return }
+            await self.loadHistory()
+            self.coalescedSyncTask = nil
+            if self.followUpRemoteSyncRequested {
+                self.followUpRemoteSyncRequested = false
+                self.handleRemoteCloudChange()
+            }
         }
     }
     
@@ -947,9 +952,11 @@ final class ClipboardHistoryViewModel: ObservableObject {
               item.localData == nil,
               item.storagePath != nil,
               ThumbnailCache.shared.data(for: item.id) == nil,
-              !assetLoadingIDs.contains(item.id)
+              !assetLoadingIDs.contains(item.id),
+              !thumbnailBackfillAttemptedIDs.contains(item.id)
         else { return }
 
+        thumbnailBackfillAttemptedIDs.insert(item.id)
         assetLoadingIDs.insert(item.id)
         assetLoadErrors[item.id] = nil
         Task(priority: .utility) {
@@ -959,7 +966,16 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 Task { await LargeTransferScheduler.preview.release() }
             }
             do {
-                guard let data = try await repository.downloadData(for: item) else { return }
+                guard let data = try await withThrowingTaskGroup(of: Data?.self) { group in
+                    group.addTask { try await self.repository.downloadData(for: item) }
+                    group.addTask {
+                        try await Task.sleep(nanoseconds: 30_000_000_000)
+                        throw URLError(.timedOut)
+                    }
+                    let result = try await group.next()!
+                    group.cancelAll()
+                    return result
+                } else { return }
                 AssetCache.shared.store(data, for: item.id)
                 ThumbnailCache.shared.createAndStore(from: data, for: item.id)
                 updateItem(id: item.id, touchModifiedAt: false) { $0.localData = data }

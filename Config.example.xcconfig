@@ -1,14 +1,10 @@
 // Config.example.xcconfig
-// hetpaste — API configuration template
+// hetpaste — local build configuration template
 //
 // 1. Copy this file to `Config.xcconfig` (which is gitignored).
-// 2. Fill in any optional AI service keys.
+// 2. Keep personal build-only values here.
 // 3. In Xcode: Project > Info > Configurations, set BOTH Debug and Release
 //    "Based on Configuration File" to `Config` for the hetpaste target.
 //
-OPENROUTER_API_KEY = your-openrouter-key-here
-OPENAI_API_KEY = your-openai-key-here
-
-// Inject the values into the generated Info.plist (read by AppConstants).
-INFOPLIST_KEY_OPENROUTER_API_KEY = $(OPENROUTER_API_KEY)
-INFOPLIST_KEY_OPENAI_API_KEY = $(OPENAI_API_KEY)
+// Do not put AI API keys in this file. Released apps read user-provided keys
+// from macOS Keychain via Settings instead of embedding secrets in the bundle.

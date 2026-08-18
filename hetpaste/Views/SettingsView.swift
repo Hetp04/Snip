@@ -475,8 +475,9 @@ struct ShortcutsDetailPage: View {
 
 struct AIProviderDetailPage: View {
     @Binding var navPath: NavigationPath
-    @AppStorage("ai.provider.apiKey") private var apiKey: String = ""
+    @AppStorage("ai.provider.apiKey") private var legacyAPIKey: String = ""
     @AppStorage("ai.provider.model") private var selectedModel: String = "openai/text-embedding-3-large"
+    @State private var apiKey: String = ""
     @State private var showKey = false
     @State private var savedFlash = false
 
@@ -584,12 +585,13 @@ struct AIProviderDetailPage: View {
                         Image(systemName: savedFlash ? "checkmark.circle.fill" : "info.circle")
                             .font(.system(size: 12))
                             .foregroundColor(savedFlash ? Color(hex: "#3D9C52") : DS.labelTertiary)
-                        Text(savedFlash ? "Saved! Changes will apply on next search." : "Your key is stored in UserDefaults on this device only.")
+                        Text(savedFlash ? "Saved securely in Keychain. Changes apply on the next search." : "Your key is stored securely in this Mac’s Keychain and never synced to iCloud.")
                             .font(.system(size: 11))
                             .foregroundColor(savedFlash ? Color(hex: "#3D9C52") : DS.labelTertiary)
                     }
                     .animation(.easeInOut(duration: 0.2), value: savedFlash)
-                    .onChange(of: apiKey) { _ in
+                    .onChange(of: apiKey) {
+                        try? SecureCredentialStore.setOpenRouterAPIKey(apiKey)
                         savedFlash = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { savedFlash = false }
                     }
@@ -600,6 +602,15 @@ struct AIProviderDetailPage: View {
             }
         }
         .background(DS.pageBg)
+        .onAppear {
+            // One-time migration from the old plaintext preference, then erase
+            // it so it cannot remain in the app's preferences database.
+            if SecureCredentialStore.openRouterAPIKey.isEmpty, !legacyAPIKey.isEmpty {
+                try? SecureCredentialStore.setOpenRouterAPIKey(legacyAPIKey)
+            }
+            legacyAPIKey = ""
+            apiKey = SecureCredentialStore.openRouterAPIKey
+        }
         .navigationBarBackButtonHidden(true)
         .toolbar {
             ToolbarItem(placement: .navigation) {

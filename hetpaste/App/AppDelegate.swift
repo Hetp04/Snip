@@ -16,9 +16,9 @@ private final class ClipboardStripPanel: NSPanel {
 }
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
-    let viewModel = ClipboardHistoryViewModel()
-    let stripController = QuickClipboardStripController()
-    let wardrobeViewModel = WardrobeViewModel()
+    lazy var viewModel = ClipboardHistoryViewModel()
+    lazy var stripController = QuickClipboardStripController()
+    lazy var wardrobeViewModel = WardrobeViewModel()
     var statusItem: NSStatusItem?
     private var stripPanel: NSPanel?
     private var hudPanel: NSPanel?

@@ -25,11 +25,11 @@ actor SearchIntentService {
     private let model = "qwen/qwen3-32b"
 
     private var apiKey: String {
-        (Bundle.main.object(forInfoDictionaryKey: "OPENROUTER_API_KEY") as? String) ?? ""
+        SecureCredentialStore.openRouterAPIKey
     }
 
     func analyze(_ query: String) async throws -> SearchIntentAnalysis {
-        guard !apiKey.isEmpty, !apiKey.contains("YOUR_") else { throw EmbeddingError.notConfigured }
+        guard !apiKey.isEmpty else { throw EmbeddingError.notConfigured }
         let prompt = """
         Interpret a clipboard-search request. Preserve every explicit constraint. Do not assume facts about the user's clipboard and do not turn a broad request into a narrow one. Expand implied meaning into neutral retrieval language and likely paraphrases.
 

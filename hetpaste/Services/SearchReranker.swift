@@ -40,11 +40,11 @@ actor SearchReranker {
     private let model = "qwen/qwen3-32b"
 
     private var apiKey: String {
-        (Bundle.main.object(forInfoDictionaryKey: "OPENROUTER_API_KEY") as? String) ?? ""
+        SecureCredentialStore.openRouterAPIKey
     }
 
     func rerank(query: String, candidates: [SearchRerankCandidate]) async throws -> [SearchRerankDecision] {
-        guard !apiKey.isEmpty, !apiKey.contains("YOUR_") else { throw SearchRerankerError.notConfigured }
+        guard !apiKey.isEmpty else { throw SearchRerankerError.notConfigured }
         guard !candidates.isEmpty else { return [] }
         let encoder = ISO8601DateFormatter()
         let candidateText = candidates.map { candidate in

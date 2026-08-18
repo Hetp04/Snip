@@ -9,18 +9,28 @@ struct hetpasteApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     var body: some Scene {
         WindowGroup {
-            ContentView(viewModel: appDelegate.viewModel)
+            if RuntimeEnvironment.isRunningUnitTests {
+                Text("Running Unit Tests")
+            } else {
+                ContentView(viewModel: appDelegate.viewModel)
+            }
         }
         .commands {
             CommandGroup(after: .textEditing) {
                 Button("Find") {
-                    appDelegate.openMainAppFocusedOnSearch()
+                    if !RuntimeEnvironment.isRunningUnitTests {
+                        appDelegate.openMainAppFocusedOnSearch()
+                    }
                 }
                 .keyboardShortcut("f", modifiers: [.option])
             }
         }
         Settings {
-            SettingsView(manager: appDelegate.viewModel.psychoCopyManager, viewModel: appDelegate.viewModel)
+            if !RuntimeEnvironment.isRunningUnitTests {
+                SettingsView(manager: appDelegate.viewModel.psychoCopyManager, viewModel: appDelegate.viewModel)
+            } else {
+                Text("Running Unit Tests")
+            }
         }
     }
 }

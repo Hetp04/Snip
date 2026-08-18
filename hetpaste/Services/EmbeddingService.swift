@@ -21,8 +21,8 @@ actor EmbeddingService {
     /// at the network await and trigger OpenRouter 429s during a backfill.
     private var nextRequestStart = Date.distantPast
 
-    private var apiKey: String { (Bundle.main.object(forInfoDictionaryKey: "OPENROUTER_API_KEY") as? String) ?? "" }
-    var isConfigured: Bool { !apiKey.isEmpty && !apiKey.contains("YOUR_") }
+    private var apiKey: String { SecureCredentialStore.openRouterAPIKey }
+    var isConfigured: Bool { !apiKey.isEmpty }
 
     func embed(_ text: String, interactive: Bool = false) async throws -> [Double] {
         guard isConfigured else { throw EmbeddingError.notConfigured }

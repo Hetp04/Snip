@@ -24,7 +24,7 @@ actor CardUnderstandingService {
     private var nextRequestStart = Date.distantPast
 
     private var apiKey: String {
-        (Bundle.main.object(forInfoDictionaryKey: "OPENROUTER_API_KEY") as? String) ?? ""
+        SecureCredentialStore.openRouterAPIKey
     }
 
     nonisolated func sourceHash(for item: ClipboardItem) -> String {
@@ -34,7 +34,7 @@ actor CardUnderstandingService {
     }
 
     func understand(_ item: ClipboardItem) async throws -> String {
-        guard !apiKey.isEmpty, !apiKey.contains("YOUR_") else { throw CardUnderstandingError.notConfigured }
+        guard !apiKey.isEmpty else { throw CardUnderstandingError.notConfigured }
         // Reserve a slot before the network await. This prevents the three
         // backfill workers from simultaneously hitting the Responses API.
         let scheduledStart = max(Date(), nextRequestStart)

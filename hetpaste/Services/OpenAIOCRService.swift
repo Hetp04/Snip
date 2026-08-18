@@ -5,19 +5,18 @@ import AppKit
 //
 // Uses a low-cost vision model through OpenRouter to extract text from images that Apple Vision
 // couldn't read (complex layouts, stylized text, mixed image+text, etc.)
-// Paste OPENROUTER_API_KEY into Config.xcconfig.
+// The user opts in and stores their own key in Keychain from Settings.
 
 actor OpenAIOCRService {
     static let shared = OpenAIOCRService()
     private init() {}
 
-    // Read from Info.plist (injected by Config.xcconfig).
     private var apiKey: String {
-        (Bundle.main.object(forInfoDictionaryKey: "OPENROUTER_API_KEY") as? String) ?? ""
+        SecureCredentialStore.openRouterAPIKey
     }
 
     var isConfigured: Bool {
-        !apiKey.isEmpty && apiKey != "YOUR_OPENROUTER_API_KEY_HERE"
+        !apiKey.isEmpty
     }
 
     private let model = "google/gemini-2.5-flash-lite"

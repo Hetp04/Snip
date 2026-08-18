@@ -206,6 +206,13 @@ final class ClipboardService: ObservableObject {
         return result.isEmpty ? nil : result
     }
     private func captureFile(at url: URL, appName: String, bundleID: String?) -> ClipboardItem {
+        // A file URL copied from Finder can carry a security-scoped grant when
+        // the app is sandboxed. Hold that scope for the exact read/bookmark
+        // operation, then persist the bookmark for later user actions.
+        let didStartAccessing = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccessing { url.stopAccessingSecurityScopedResource() }
+        }
         let ext = url.pathExtension.lowercased()
         let values = try? url.resourceValues(forKeys: [.contentTypeKey, .fileSizeKey])
         let utType = values?.contentType ?? UTType(filenameExtension: ext)
