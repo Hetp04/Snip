@@ -966,7 +966,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 Task { await LargeTransferScheduler.preview.release() }
             }
             do {
-                guard let data = try await withThrowingTaskGroup(of: Data?.self) { group in
+                let resultData = try await withThrowingTaskGroup(of: Data?.self) { group in
                     group.addTask { try await self.repository.downloadData(for: item) }
                     group.addTask {
                         try await Task.sleep(nanoseconds: 30_000_000_000)
@@ -975,7 +975,8 @@ final class ClipboardHistoryViewModel: ObservableObject {
                     let result = try await group.next()!
                     group.cancelAll()
                     return result
-                } else { return }
+                }
+                guard let data = resultData else { return }
                 AssetCache.shared.store(data, for: item.id)
                 ThumbnailCache.shared.createAndStore(from: data, for: item.id)
                 updateItem(id: item.id, touchModifiedAt: false) { $0.localData = data }
