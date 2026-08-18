@@ -31,10 +31,10 @@ struct RichTextCodeView: View {
     private func loadRichText() {
         DispatchQueue.global(qos: .userInitiated).async {
             var nsAttr: NSAttributedString? = nil
-            if let rtf = item.rtfData {
-                nsAttr = try? NSAttributedString(data: rtf, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil)
-            } else if let rtfd = item.rtfdData {
+            if let rtfd = item.rtfdData {
                 nsAttr = try? NSAttributedString(data: rtfd, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil)
+            } else if let rtf = item.rtfData {
+                nsAttr = try? NSAttributedString(data: rtf, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil)
             } else if let html = item.htmlData {
                 nsAttr = try? NSAttributedString(data: html, options: [.documentType: NSAttributedString.DocumentType.html], documentAttributes: nil)
             }
@@ -66,8 +66,8 @@ struct RichTextCodeView: View {
                 let traits = oldFont?.fontDescriptor.symbolicTraits ?? []
                 let weight: NSFont.Weight = traits.contains(.bold) ? .semibold : .regular
                 var normalized = NSFont.systemFont(ofSize: size, weight: weight)
-                if traits.contains(.italic) {
-                    normalized = NSFontManager.shared.convert(normalized, toHaveTrait: .italicFontMask)
+                if traits.contains(.italic), let italicDescriptor = normalized.fontDescriptor.withSymbolicTraits(.italic) {
+                    normalized = NSFont(descriptor: italicDescriptor, size: size) ?? normalized
                 }
                 mutableAttr.addAttribute(.font, value: normalized, range: range)
             }

@@ -120,6 +120,18 @@ final class ClipboardRepository {
     }
     func updateEmbeddings(id: UUID, rawVector: [Double]?, memoryVector: [Double]?, status: String) async throws { try await mutate(id) { $0["rawEmbedding"] = rawVector.map(CloudKitVectorCodec.encode); $0["embedding"] = memoryVector.map(CloudKitVectorCodec.encode); $0["embeddingStatus"] = status } }
     func updateEmbeddingStatus(id: UUID, status: String) async throws { try await mutate(id) { $0["embeddingStatus"] = status } }
+    
+    func updateContent(id: UUID, contentText: String?, rtfData: Data?, htmlData: Data?, rtfdData: Data?) async throws {
+        try await mutate(id) { r in
+            r["contentText"] = contentText?.cloudKitInlineValue(maximumUTF8Bytes: 512 * 1024)
+            r["rtfData"] = rtfData
+            r["htmlData"] = htmlData
+            r["rtfdData"] = rtfdData
+            // If the user replaces a huge image/text with small text, we orphan the chunks.
+            // But this is acceptable per the requirements to just update the fields unconditionally.
+        }
+    }
+
     /// Backfill the compact image preview without replacing/re-uploading the
     /// original asset. This makes migrated cards fast on the user's other Macs.
     func updateThumbnail(id: UUID, data: Data) async throws {

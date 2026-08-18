@@ -25,10 +25,12 @@ struct ClipboardItemRow: View {
     var onRetryAssetDownload: () -> Void = {}
     /// Opens the OCR live-text viewer. If nil falls back to QuickLook.
     var onOpenOCRViewer: (() -> Void)? = nil
+    var onSaveContent: ((UUID, String?, Data?, Data?, Data?) -> Void)? = nil
     @State private var isHovered: Bool = false
     @State private var isCopyHovered: Bool = false
     @State private var isStarHovered: Bool = false
     @State private var isTrashHovered: Bool = false
+    @State private var isExpandedTextPresented: Bool = false
     private var headerIcon: NSImage? {
         if let bid = item.sourceAppBundleID, !bid.isEmpty {
             if let img = IconCache.shared.cachedAppIcon(bundleID: bid) {
@@ -455,7 +457,12 @@ struct ClipboardItemRow: View {
                 revealFileInFinder()
             } else if item.contentType == .image {
                 openOCRViewer()
+            } else if item.contentType == .text || item.contentType == .richText {
+                isExpandedTextPresented = true
             }
+        }
+        .popover(isPresented: $isExpandedTextPresented, arrowEdge: .trailing) {
+            ExpandedTextSnippetView(item: item, onSave: onSaveContent)
         }
         .onTapGesture {
             onPrimaryTap?()
@@ -625,13 +632,14 @@ struct ClipboardItemRow: View {
     @ViewBuilder
     private var pasteTextPreview: some View {
         Group {
-            if item.contentType == .richText || isCodeContent {
+            if item.contentType == .richText || isCodeContent || item.rtfData != nil || item.rtfdData != nil {
                 RichTextCodeView(
                     item: item,
                     lineLimit: isExpanded ? nil : 5,
                     fontSize: 12,
                     textColor: NSColor(calibratedRed: 55 / 255, green: 53 / 255, blue: 47 / 255, alpha: 1)
                 )
+                    .id(item.updatedAt)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .padding(.horizontal, 10)
@@ -921,9 +929,10 @@ struct ClipboardItemRow: View {
             }
         } else {
             Group {
-                if item.contentType == .richText || isCodeContent {
+                if item.contentType == .richText || isCodeContent || item.rtfData != nil || item.rtfdData != nil {
                     VStack(alignment: .leading, spacing: 0) {
                         RichTextCodeView(item: item, lineLimit: isExpanded ? nil : 6)
+                            .id(item.updatedAt)
                             .multilineTextAlignment(.leading)
                     }
                     .padding(10)

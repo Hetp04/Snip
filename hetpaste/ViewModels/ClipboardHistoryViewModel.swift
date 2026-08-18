@@ -1529,6 +1529,20 @@ final class ClipboardHistoryViewModel: ObservableObject {
     /// If the process stops at any point, the normal item queue replays the
     /// whole current record; CloudKit's timestamp conflict rule prevents that
     /// replay from replacing a newer edit from another device.
+    func updateItemContent(id: UUID, contentText: String?, rtfData: Data?, htmlData: Data?, rtfdData: Data?) async throws {
+        updateItem(id: id) {
+            $0.contentText = contentText
+            $0.rtfData = rtfData
+            $0.htmlData = htmlData
+            $0.rtfdData = rtfdData
+            $0.updatedAt = Date()
+        }
+        
+        runDurableItemMutation(itemID: id) { [repository] in
+            try await repository.updateContent(id: id, contentText: contentText, rtfData: rtfData, htmlData: htmlData, rtfdData: rtfdData)
+        }
+    }
+
     private func runDurableItemMutation(itemID: UUID, operation: @escaping () async throws -> Void) {
         queueItemForRetry(itemID)
         Task { [weak self] in

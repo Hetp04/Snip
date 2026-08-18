@@ -1000,73 +1000,89 @@ struct ClipboardFeedView: View {
         }
     }
     private func gridItemRow(_ item: ClipboardItem) -> some View {
-        Group {
+        let freshItem = viewModel.items.first(where: { $0.id == item.id }) ?? item
+        return Group {
             if isChainSelectionMode, let chainBinding = chainSelectedIDs {
-                let isSelectedForChain = chainBinding.wrappedValue.contains(item.id)
+                let isSelectedForChain = chainBinding.wrappedValue.contains(freshItem.id)
                 ClipboardItemRow(
-                    item: item,
+                    item: freshItem,
                     isSelected: isSelectedForChain,
                     isMostRecent: false,
                     onToggleFavorite: {},
                     onRetrySync: {},
-                    onCopy: { toggleChainSelection(item.id, binding: chainBinding) },
+                    onCopy: { toggleChainSelection(freshItem.id, binding: chainBinding) },
                     onDelete: {},
                     onTrash: {},
                     onExpand: {},
-                    onPrimaryTap: { toggleChainSelection(item.id, binding: chainBinding) }
+                    onPrimaryTap: { toggleChainSelection(freshItem.id, binding: chainBinding) }
                 )
             } else {
                 ClipboardItemRow(
-                    item: item,
-                    isSelected: selectedItemID == item.id,
-                    isMostRecent: item.id == mostRecentID,
-                    onToggleFavorite: { viewModel.toggleFavorite(item) },
-                    onRetrySync: { viewModel.retrySync(item) },
+                    item: freshItem,
+                    isSelected: selectedItemID == freshItem.id,
+                    isMostRecent: freshItem.id == mostRecentID,
+                    onToggleFavorite: { viewModel.toggleFavorite(freshItem) },
+                    onRetrySync: { viewModel.retrySync(freshItem) },
                     onCopy: {
-                        selectedItemID = item.id
-                        viewModel.copyToPasteboard(item)
-                        onItemCopy(item)
+                        selectedItemID = freshItem.id
+                        viewModel.copyToPasteboard(freshItem)
+                        onItemCopy(freshItem)
                     },
                     onDelete: {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             if let selectedFolder {
-                                viewModel.removeFromFolder(item, folderID: selectedFolder.id)
+                                viewModel.removeFromFolder(freshItem, folderID: selectedFolder.id)
                             } else {
-                                viewModel.deleteItem(item)
+                                viewModel.deleteItem(freshItem)
                             }
                         }
                     },
-                    onTrash: { viewModel.moveToTrash(item) },
-                    onExpand: { onExpandItem?(item) },
+                    onTrash: { viewModel.moveToTrash(freshItem) },
+                    onExpand: { onExpandItem?(freshItem) },
                     onPrimaryTap: {
-                        selectedItemID = item.id
-                        selectedItemIDs = [item.id]
-                        viewModel.copyToPasteboard(item)
-                        onItemCopy(item)
+                        selectedItemID = freshItem.id
+                        selectedItemIDs = [freshItem.id]
+                        viewModel.copyToPasteboard(freshItem)
+                        onItemCopy(freshItem)
                     },
-                    isAssetLoading: viewModel.assetLoadingIDs.contains(item.id),
-                    assetLoadError: viewModel.assetLoadError(for: item.id),
-                    onRetryAssetDownload: { viewModel.retryAssetDownload(for: item) },
-                    onOpenOCRViewer: item.contentType == .image ? {
-                        ImageTextViewerWindowManager.shared.open(item: item, viewModel: viewModel)
-                    } : nil
+                    isAssetLoading: viewModel.assetLoadingIDs.contains(freshItem.id),
+                    assetLoadError: viewModel.assetLoadError(for: freshItem.id),
+                    onRetryAssetDownload: { viewModel.retryAssetDownload(for: freshItem) },
+                    onOpenOCRViewer: freshItem.contentType == .image ? {
+                        ImageTextViewerWindowManager.shared.open(item: freshItem, viewModel: viewModel)
+                    } : nil,
+                    onSaveContent: { id, contentText, rtfData, htmlData, rtfdData in
+                        Task {
+                            do {
+                                try await viewModel.updateItemContent(
+                                    id: id,
+                                    contentText: contentText,
+                                    rtfData: rtfData,
+                                    htmlData: htmlData,
+                                    rtfdData: rtfdData
+                                )
+                            } catch {
+                                print("Failed to save content: \(error)")
+                            }
+                        }
+                    }
                 )
-                .opacity(draggingItemIDs.contains(item.id) ? 0.35 : 1)
+                .opacity(draggingItemIDs.contains(freshItem.id) ? 0.35 : 1)
                 .animation(.easeOut(duration: 0.16), value: draggingItemIDs)
                 .onDrag {
-                    let ids = selectedItemIDs.contains(item.id) ? Array(selectedItemIDs) : [item.id]
+                    let ids = selectedItemIDs.contains(freshItem.id) ? Array(selectedItemIDs) : [freshItem.id]
                     draggingItemIDs = Set(ids)
                     // No explicit drag-end callback in SwiftUI onDrag — reset after
                     // a generous timeout so it reappears if the drag is cancelled.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 4) { draggingItemIDs = [] }
                     return viewModel.folderDragItemProvider(for: ids)
                 } preview: {
-                    dragPreview(for: item)
+                    dragPreview(for: freshItem)
                 }
                 .onAppear {
                     // Existing cards created before the thumbnail feature are
                     // migrated automatically in a throttled background queue.
-                    viewModel.prepareImageThumbnailIfNeeded(for: item)
+                    viewModel.prepareImageThumbnailIfNeeded(for: freshItem)
                 }
             }
         }
