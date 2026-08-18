@@ -174,6 +174,12 @@ struct ContentView: View {
                 destination = .history
             }
         }
+        .onAppear {
+            viewModel.handleRemoteCloudChange()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            viewModel.handleRemoteCloudChange()
+        }
     }
     @ViewBuilder
     private var mainStage: some View {

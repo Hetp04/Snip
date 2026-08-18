@@ -248,18 +248,24 @@ final class CloudKitManager {
         var token = savedToken
         var changed = false
         while true {
-            let page = try await database.recordZoneChanges(inZoneWith: libraryZoneID, since: token)
-            var modifications: [CKRecord] = []
-            for (_, result) in page.modificationResultsByID {
-                modifications.append(try result.get().record)
+            do {
+                let fetchedPage = try await database.recordZoneChanges(inZoneWith: libraryZoneID, since: token)
+                var modifications: [CKRecord] = []
+                for (_, result) in fetchedPage.modificationResultsByID {
+                    modifications.append(try result.get().record)
+                }
+                let deletions = fetchedPage.deletions.map(\.recordID)
+                if !modifications.isEmpty { onRecordsChanged(modifications) }
+                if !deletions.isEmpty { onRecordsDeleted(deletions) }
+                changed = changed || !modifications.isEmpty || !deletions.isEmpty
+                if !modifications.isEmpty || !deletions.isEmpty { onPageApplied() }
+                token = fetchedPage.changeToken
+                if !fetchedPage.moreComing { break }
+            } catch let error as CKError where error.code == .changeTokenExpired {
+                UserDefaults.standard.removeObject(forKey: key)
+                token = nil
+                continue
             }
-            let deletions = page.deletions.map(\.recordID)
-            if !modifications.isEmpty { onRecordsChanged(modifications) }
-            if !deletions.isEmpty { onRecordsDeleted(deletions) }
-            changed = changed || !modifications.isEmpty || !deletions.isEmpty
-            if !modifications.isEmpty || !deletions.isEmpty { onPageApplied() }
-            token = page.changeToken
-            if !page.moreComing { break }
         }
         if let token, let data = try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true) {
             UserDefaults.standard.set(data, forKey: key)

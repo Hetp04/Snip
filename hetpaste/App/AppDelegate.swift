@@ -55,6 +55,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 .forEach {
                     $0.title = ""
                     $0.titleVisibility = .hidden
+                    $0.isReleasedWhenClosed = false
                 }
         }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -77,6 +78,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self,
             selector: #selector(applicationDidBecomeActive(_:)),
             name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake(_:)),
+            name: NSWorkspace.screensDidWakeNotification,
             object: nil
         )
         psychoCopyModeObserver = NotificationCenter.default.addObserver(
@@ -171,6 +184,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         openMainApp()
     }
     private func showClipboardStrip() {
+        viewModel.handleRemoteCloudChange()
         let panel = stripPanel ?? makeClipboardStripPanel()
         stripPanel = panel
         stripController.syncFocus(itemCount: visibleStripItems.count)
@@ -291,11 +305,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func openMainApp() {
         NSApp.activate(ignoringOtherApps: true)
+        var didShow = false
         for window in NSApp.windows where window !== stripPanel {
             guard !(window is NSPanel) else { continue }
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
             window.makeKeyAndOrderFront(nil)
+            didShow = true
             break
         }
+        if !didShow {
+            NSApp.sendAction(Selector(("showMainWindow:")), to: nil, from: nil)
+        }
+        viewModel.handleRemoteCloudChange()
+        Task { await wardrobeViewModel.loadItems() }
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openMainApp()
+        return true
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
     func openMainAppFocusedOnSearch() {
         openMainApp()
@@ -344,6 +375,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // delta fetch on activation makes fast-user-switching (and returning to
         // the app on a second Mac) converge without requiring Sync Now.
         viewModel.handleRemoteCloudChange()
+        Task { await wardrobeViewModel.loadItems() }
+    }
+    @objc func systemDidWake(_ notification: Notification) {
+        viewModel.handleRemoteCloudChange()
+        Task { await wardrobeViewModel.loadItems() }
     }
     func applicationWillTerminate(_ notification: Notification) {
         viewModel.persistLibraryCache(immediately: true)
@@ -356,6 +392,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // CloudKit notifications are hints only; reload through the normal
         // merge path so coalesced notifications never lose library changes.
         viewModel.handleRemoteCloudChange()
+        Task { await wardrobeViewModel.loadItems() }
     }
     private func updateStatusBarIcon() {
         let isActive = viewModel.psychoCopyManager.isMultiCopyModeActive

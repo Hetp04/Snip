@@ -62,6 +62,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
     private var metadataPersistenceTask: Task<Void, Never>?
     private var followUpRemoteSyncRequested = false
     private var clipboardCaptureStateCancellable: AnyCancellable?
+    private var backgroundSyncTimer: Timer?
     private let retryNotBeforeKey = "cloudkit.retry-not-before"
     private let initialPageSize = 80
     @Published private(set) var hasMoreCachedItems = false
@@ -110,6 +111,16 @@ final class ClipboardHistoryViewModel: ObservableObject {
             }
         service.start()
         Task { await loadHistory() }
+
+        // Continuous automatic background sync: guarantees cards sync even when
+        // silent push notifications are dropped or delayed, and while the main window is closed.
+        let timer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleRemoteCloudChange()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.backgroundSyncTimer = timer
     }
 
     func toggleClipboardCapturePaused() {
