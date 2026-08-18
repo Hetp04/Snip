@@ -102,10 +102,12 @@ final class ClipboardService: ObservableObject {
         captureQueue.async { [weak self] in
             guard let self else { return }
             let snapshot = PasteboardSnapshot(from: NSPasteboard.general)
-            guard let item = self.captureFromSnapshot(snapshot, sourceApp: sourceApp, captureRaw: shouldCaptureRaw) else { return }
-            DispatchQueue.main.async {
-                guard !self.isCapturePaused, self.captureGeneration == generation else { return }
-                self.onNewItem?(item)
+            let items = self.captureFromSnapshot(snapshot, sourceApp: sourceApp, captureRaw: shouldCaptureRaw)
+            for item in items {
+                DispatchQueue.main.async {
+                    guard !self.isCapturePaused, self.captureGeneration == generation else { return }
+                    self.onNewItem?(item)
+                }
             }
         }
     }
@@ -139,14 +141,16 @@ final class ClipboardService: ObservableObject {
         _ snapshot: PasteboardSnapshot,
         sourceApp: (name: String, bundleID: String?, icon: NSImage?),
         captureRaw: Bool
-    ) -> ClipboardItem? {
+    ) -> [ClipboardItem] {
         let appName  = sourceApp.name
         let bundleID = sourceApp.bundleID
         if let bundleID, let icon = sourceApp.icon {
             IconCache.shared.prime(bundleID: bundleID, runningIcon: icon)
         }
-        if let fileURL = snapshot.fileURLs.first {
-            return captureFile(at: fileURL, appName: appName, bundleID: bundleID)
+        if !snapshot.fileURLs.isEmpty {
+            return snapshot.fileURLs.compactMap { fileURL in
+                captureFile(at: fileURL, appName: appName, bundleID: bundleID)
+            }
         }
         if let imageData = resolvedImageData(png: snapshot.pngData, tiff: snapshot.tiffData) {
             var item = ClipboardItem(
@@ -161,7 +165,7 @@ final class ClipboardService: ObservableObject {
                 localData: imageData
             )
             if captureRaw { item.rawPasteboardData = nonEmptyDict(snapshot.allRawData) }
-            return item
+            return [item]
         }
         let plainText = resolvedPlainText(
             string: snapshot.plainString,
@@ -172,7 +176,7 @@ final class ClipboardService: ObservableObject {
         if var richText = captureRichTextFromSnapshot(snapshot, plainText: plainText, appName: appName, bundleID: bundleID) {
             richText.detectedLanguage = CodeLanguageDetector.detectLanguage(in: richText.contentText ?? "")
             if captureRaw { richText.rawPasteboardData = nonEmptyDict(snapshot.allRawData) }
-            return richText
+            return [richText]
         }
         if let text = plainText {
             let type: ContentType = isURL(text) ? .url : .text
@@ -187,9 +191,9 @@ final class ClipboardService: ObservableObject {
                 item.detectedLanguage = CodeLanguageDetector.detectLanguage(in: text)
             }
             if captureRaw { item.rawPasteboardData = nonEmptyDict(snapshot.allRawData) }
-            return item
+            return [item]
         }
-        return nil
+        return []
     }
     private func nonEmptyDict(_ dict: [NSPasteboard.PasteboardType: Data]) -> [String: Data]? {
         guard !dict.isEmpty else { return nil }
