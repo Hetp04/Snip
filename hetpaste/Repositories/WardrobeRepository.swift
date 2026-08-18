@@ -10,7 +10,7 @@ final class WardrobeRepository {
             guard data.count <= 50 * 1024 * 1024 else { throw CloudKitPersistenceError.assetTooLarge(Int64(data.count)) }
             let pair = try cloud.asset(from: data, id: item.id); r["asset"] = pair.0; temp = pair.1; synced.storagePath = item.id.uuidString; r["storagePath"] = synced.storagePath
         }
-        defer { if let temp { try? FileManager.default.removeItem(at: temp) } }; cloud.save(r); return synced
+        defer { if let temp { try? FileManager.default.removeItem(at: temp) } }; _ = try await cloud.save(r); return synced
     }
     func delete(id: UUID) async throws { try await cloud.delete(type: CloudRecordType.wardrobeItem, id: id) }
     func downloadData(for item: WardrobeItem) async throws -> Data? { guard let r = try await cloud.record(type: CloudRecordType.wardrobeItem, id: item.id), let url = (r["asset"] as? CKAsset)?.fileURL else { return nil }; return try Data(contentsOf: url) }

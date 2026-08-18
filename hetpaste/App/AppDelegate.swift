@@ -392,14 +392,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, didReceiveRemoteNotification userInfo: [String: Any]) {
         if let dict = userInfo as? [String: NSObject],
            let notification = CKNotification(fromRemoteNotificationDictionary: dict) {
-            if notification.subscriptionID == "hetpaste-sync-engine-subscription" || notification.subscriptionID == "clipboard-library-zone-changes" {
-                // Pass notification to the sync engine if possible
-                if #available(macOS 14.0, *) {
-                    Task {
-                        try? await CloudKitManager.shared.engine?.fetchChanges()
-                    }
-                }
-                
+            if notification.subscriptionID == "clipboard-library-zone-changes" {
                 // CloudKit notifications are hints only; reload through the normal
                 // merge path so coalesced notifications never lose library changes.
                 viewModel.handleRemoteCloudChange()

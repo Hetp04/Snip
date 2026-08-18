@@ -6,195 +6,32 @@ struct CloudBatchDeletionFailure: Error {
     let underlyingError: Error
 }
 
-/// A persistent cache for `CKRecord` instances waiting to be uploaded by `CKSyncEngine`.
-final class PendingRecordStore {
-    static let shared = PendingRecordStore()
-    
-    private let fileURL: URL
-    private var records: [CKRecord.ID: CKRecord] = [:]
-    private let lock = NSLock()
-    
-    private init() {
-        let fileManager = FileManager.default
-        let support = (try? fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)) ?? fileManager.temporaryDirectory
-        let directory = support.appendingPathComponent("hetpaste", isDirectory: true)
-        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        fileURL = directory.appendingPathComponent("pending-sync-records.data")
-        
-        loadLocked()
-    }
-    
-    func store(_ record: CKRecord) {
-        lock.lock(); defer { lock.unlock() }
-        records[record.recordID] = record
-        persistLocked()
-    }
-    
-    func remove(id: CKRecord.ID) {
-        lock.lock(); defer { lock.unlock() }
-        records.removeValue(forKey: id)
-        persistLocked()
-    }
-    
-    func record(for id: CKRecord.ID) -> CKRecord? {
-        lock.lock(); defer { lock.unlock() }
-        return records[id]
-    }
-    
-    private func loadLocked() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let dict = try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSDictionary.self, CKRecord.self, CKRecord.ID.self, NSString.self], from: data) as? [CKRecord.ID: CKRecord] else {
-            return
-        }
-        records = dict
-    }
-    
-    private func persistLocked() {
-        guard let data = try? NSKeyedArchiver.archivedData(withRootObject: records, requiringSecureCoding: true) else { return }
-        try? data.write(to: fileURL, options: .atomic)
-    }
+private enum CloudBatchDeletionInternalError: Error {
+    case missingResult
 }
 
 /// The single entry point for the user's private iCloud clipboard library.
 /// Stable UUIDs are used as CloudKit record names so models never depend on
-/// temporary CKRecord instances. 
-@available(macOS 14.0, *)
-final class CloudKitManager: @unchecked Sendable, CKSyncEngineDelegate {
+/// temporary CKRecord instances. CloudKit's server-record-changed error is
+/// resolved last-writer-wins using each model's updated timestamp.
+final class CloudKitManager {
     static let shared = CloudKitManager()
 
     let container: CKContainer
     let database: CKDatabase
     let libraryZoneID = CKRecordZone.ID(zoneName: "ClipboardLibrary")
-    
-    private(set) var engine: CKSyncEngine!
-    private let stateKey = "cloudkit.engine.state"
-    
-    // Callbacks to pipe data back to LibraryMetadataStore
-    var onRecordsChanged: (([CKRecord]) -> Void)?
-    var onRecordsDeleted: (([CKRecord.ID]) -> Void)?
-    
+    private var isPrepared = false
+    private var preparationTask: Task<Void, Error>?
+
     private init(container: CKContainer = .default()) {
         self.container = container
         self.database = container.privateCloudDatabase
-    }
-    
-    func start() async throws {
-        // Initialize the zone
-        _ = try? await database.modifyRecordZones(saving: [CKRecordZone(zoneID: libraryZoneID)], deleting: [])
-        
-        let stateData = UserDefaults.standard.data(forKey: stateKey)
-        let state = stateData.flatMap { try? JSONDecoder().decode(CKSyncEngine.State.Serialization.self, from: $0) }
-        
-        let config = CKSyncEngine.Configuration(
-            database: self.database,
-            stateSerialization: state,
-            delegate: self
-        )
-        self.engine = CKSyncEngine(config)
-        
-        let zone = CKRecordZone(zoneID: libraryZoneID)
-        engine.state.add(pendingDatabaseChanges: [.saveZone(zone)])
-        
-        let subscriptionID = "hetpaste-sync-engine-subscription"
-        do {
-            _ = try await database.subscription(for: subscriptionID)
-        } catch {
-            let subscription = CKDatabaseSubscription(subscriptionID: subscriptionID)
-            let notificationInfo = CKSubscription.NotificationInfo()
-            notificationInfo.shouldSendContentAvailable = true
-            subscription.notificationInfo = notificationInfo
-            try? await database.save(subscription)
-        }
-    }
-
-    func handleEvent(_ event: CKSyncEngine.Event, syncEngine: CKSyncEngine) async {
-        switch event {
-        case .stateUpdate(let stateEvent):
-            if let data = try? JSONEncoder().encode(stateEvent.stateSerialization) {
-                UserDefaults.standard.set(data, forKey: stateKey)
-            }
-        case .fetchedRecordZoneChanges(let fetchEvent):
-            let modifications = fetchEvent.modifications.map { $0.record }
-            let deletions = fetchEvent.deletions.map { $0.recordID }
-            if !modifications.isEmpty { onRecordsChanged?(modifications) }
-            if !deletions.isEmpty { onRecordsDeleted?(deletions) }
-        case .sentRecordZoneChanges(let sentEvent):
-            for record in sentEvent.savedRecords {
-                PendingRecordStore.shared.remove(id: record.recordID)
-                cleanupTemporaryAssets(for: record)
-            }
-            for deletion in sentEvent.deletedRecordIDs {
-                PendingRecordStore.shared.remove(id: deletion)
-            }
-            for failed in sentEvent.failedRecordSaves {
-                if let ckError = failed.error as? CKError, ckError.code == .serverRecordChanged, let serverRecord = ckError.serverRecord {
-                    // Conflict resolution: last writer wins
-                    let local = failed.record
-                    let localUpdatedAt = local["updatedAt"] as? Date ?? local.modificationDate ?? .distantPast
-                    let serverUpdatedAt = serverRecord["updatedAt"] as? Date ?? serverRecord.modificationDate ?? .distantPast
-                    
-                    if localUpdatedAt > serverUpdatedAt {
-                        // Re-save local
-                        engine.state.add(pendingRecordZoneChanges: [.saveRecord(local.recordID)])
-                    } else {
-                        PendingRecordStore.shared.remove(id: failed.record.recordID)
-                        cleanupTemporaryAssets(for: failed.record)
-                    }
-                } else if !engine.state.pendingRecordZoneChanges.contains(.saveRecord(failed.record.recordID)) {
-                    PendingRecordStore.shared.remove(id: failed.record.recordID)
-                    cleanupTemporaryAssets(for: failed.record)
-                }
-            }
-        case .accountChange:
-            // Clear local state if needed
-            UserDefaults.standard.removeObject(forKey: stateKey)
-        default:
-            break
-        }
-    }
-    
-    private func cleanupTemporaryAssets(for record: CKRecord) {
-        for key in record.allKeys() {
-            if let asset = record[key] as? CKAsset, let url = asset.fileURL {
-                if url.path.contains("hetpaste-cloudkit") {
-                    try? FileManager.default.removeItem(at: url)
-                }
-            }
-        }
-    }
-    
-    func nextRecordZoneChangeBatch(
-        _ context: CKSyncEngine.SendChangesContext,
-        syncEngine: CKSyncEngine
-    ) async -> CKSyncEngine.RecordZoneChangeBatch? {
-        var modifications = [CKRecord]()
-        var deletions = [CKRecord.ID]()
-        
-        for change in engine.state.pendingRecordZoneChanges {
-            switch change {
-            case .saveRecord(let id):
-                if let record = PendingRecordStore.shared.record(for: id) {
-                    modifications.append(record)
-                }
-            case .deleteRecord(let id):
-                deletions.append(id)
-            @unknown default:
-                break
-            }
-        }
-        
-        if modifications.isEmpty && deletions.isEmpty { return nil }
-        
-        return CKSyncEngine.RecordZoneChangeBatch(
-            recordsToSave: modifications,
-            recordIDsToDelete: deletions,
-            atomicByZone: false
-        )
     }
 
     func verifyAccount() async throws {
         let status = try await container.accountStatus()
         guard status == .available else { throw CloudKitPersistenceError.accountUnavailable(status) }
+        try await prepareLibraryZone()
     }
 
     func record(type: String, id: UUID) async throws -> CKRecord? {
@@ -207,18 +44,32 @@ final class CloudKitManager: @unchecked Sendable, CKSyncEngineDelegate {
         catch let error as CKError where error.code == .unknownItem { return nil }
     }
 
-    func save(_ record: CKRecord) {
-        PendingRecordStore.shared.store(record)
-        engine.state.add(pendingRecordZoneChanges: [.saveRecord(record.recordID)])
+    @discardableResult
+    func save(_ record: CKRecord) async throws -> CKRecord {
+        try await verifyAccount()
+        do { return try await database.save(record) }
+        catch let error as CKError where error.code == .serverRecordChanged {
+            guard let server = error.serverRecord else { throw error }
+            // Deterministic conflict rule: last modification wins. A queued
+            // offline change retains its original updatedAt, so it cannot
+            // overwrite a newer edit made on another device.
+            let localUpdatedAt = record["updatedAt"] as? Date ?? record.modificationDate ?? .distantPast
+            let serverUpdatedAt = server["updatedAt"] as? Date ?? server.modificationDate ?? .distantPast
+            guard localUpdatedAt > serverUpdatedAt else { return server }
+            let temporaryAssetURLs = try copyFields(from: record, to: server)
+            defer { removeTemporaryAssets(at: temporaryAssetURLs) }
+            return try await database.save(server)
+        }
     }
 
-    func delete(type: String, id: UUID) {
-        delete(type: type, recordName: "\(type).\(id.uuidString.lowercased())")
+    func delete(type: String, id: UUID) async throws {
+        try await delete(type: type, recordName: "\(type).\(id.uuidString.lowercased())")
     }
 
-    func delete(type: String, recordName: String) {
-        let id = recordID(type: type, recordName: recordName)
-        engine.state.add(pendingRecordZoneChanges: [.deleteRecord(id)])
+    func delete(type: String, recordName: String) async throws {
+        try await verifyAccount()
+        do { _ = try await database.deleteRecord(withID: recordID(type: type, recordName: recordName)) }
+        catch let error as CKError where error.code == .unknownItem { return }
     }
 
     func fetchAll(type: String, sort: [NSSortDescriptor] = []) async throws -> [CKRecord] {
@@ -233,6 +84,10 @@ final class CloudKitManager: @unchecked Sendable, CKSyncEngineDelegate {
             for (_, value) in page.matchResults { result.append(try value.get()) }
             cursor = page.queryCursor
         } while cursor != nil
+        // Do not send sort descriptors until the first record has defined the
+        // corresponding field in a new development schema. This lets a clean
+        // CloudKit container bootstrap itself instead of failing before its
+        // first save; callers retain their requested order locally.
         guard let descriptor = sort.first, let key = descriptor.key else { return result }
         return result.sorted { lhs, rhs in
             let left = lhs[key] as? Date
@@ -247,6 +102,8 @@ final class CloudKitManager: @unchecked Sendable, CKSyncEngineDelegate {
         }
     }
 
+    /// Retrieves the first, server-sorted metadata page for a new local index.
+    /// This lets the UI show recent cards before historical import completes.
     func fetchFirstPage(type: String, sort: NSSortDescriptor, limit: Int) async throws -> [CKRecord] {
         try await verifyAccount()
         let query = CKQuery(recordType: type, predicate: NSPredicate(value: true))
@@ -270,12 +127,15 @@ final class CloudKitManager: @unchecked Sendable, CKSyncEngineDelegate {
             else { page = try await database.records(matching: query, inZoneWith: libraryZoneID, desiredKeys: nil, resultsLimit: CKQueryOperation.maximumResults) }
             for (id, value) in page.matchResults {
                 _ = try value.get()
-                delete(recordID: id)
+                _ = try await database.deleteRecord(withID: id)
             }
             cursor = page.queryCursor
         } while cursor != nil
     }
 
+    /// Deletes query matches in bounded, non-atomic batches. Successful record
+    /// IDs are retained when CloudKit reports a partial failure so callers can
+    /// update only the local rows that are known to be gone from iCloud.
     func deleteMatchingRecords(
         type: String,
         predicate: NSPredicate,
@@ -306,22 +166,46 @@ final class CloudKitManager: @unchecked Sendable, CKSyncEngineDelegate {
                     return id
                 }
 
-                for id in recordIDs {
-                    delete(recordID: id)
-                    deleted.insert(id)
+                for start in stride(from: 0, to: recordIDs.count, by: batchSize) {
+                    let end = min(start + batchSize, recordIDs.count)
+                    let batch = Array(recordIDs[start..<end])
+                    let result = try await database.modifyRecords(
+                        saving: [],
+                        deleting: batch,
+                        savePolicy: .ifServerRecordUnchanged,
+                        atomically: false
+                    )
+                    var firstFailure: Error?
+                    for id in batch {
+                        switch result.deleteResults[id] {
+                        case .success?:
+                            deleted.insert(id)
+                        case let .failure(error)?:
+                            if let cloudError = error as? CKError, cloudError.code == .unknownItem {
+                                deleted.insert(id)
+                            } else if firstFailure == nil {
+                                firstFailure = error
+                            }
+                        case nil:
+                            if firstFailure == nil {
+                                firstFailure = CloudBatchDeletionInternalError.missingResult
+                            }
+                        }
+                    }
+                    progress?(deleted.count)
+                    if let firstFailure {
+                        throw CloudBatchDeletionFailure(deletedRecordIDs: deleted, underlyingError: firstFailure)
+                    }
                 }
-                progress?(deleted.count)
                 cursor = page.queryCursor
             } while cursor != nil
             return deleted
+        } catch let partial as CloudBatchDeletionFailure {
+            throw partial
         } catch {
             if deleted.isEmpty { throw error }
             throw CloudBatchDeletionFailure(deletedRecordIDs: deleted, underlyingError: error)
         }
-    }
-    
-    func delete(recordID: CKRecord.ID) {
-        engine.state.add(pendingRecordZoneChanges: [.deleteRecord(recordID)])
     }
 
     func recordID(type: String, id: UUID) -> CKRecord.ID {
@@ -349,6 +233,46 @@ final class CloudKitManager: @unchecked Sendable, CKSyncEngineDelegate {
         return all
     }
 
+    /// Advances the persisted server-change token for the custom zone. The
+    /// caller can refresh its model only when another device changed records.
+    func consumeRemoteChanges(
+        onRecordsChanged: @escaping ([CKRecord]) -> Void = { _ in },
+        onRecordsDeleted: @escaping ([CKRecord.ID]) -> Void = { _ in },
+        onPageApplied: @escaping () -> Void = {}
+    ) async throws -> Bool {
+        try await verifyAccount()
+        let key = "cloudkit.library-zone-change-token"
+        let savedToken = UserDefaults.standard.data(forKey: key).flatMap {
+            try? NSKeyedUnarchiver.unarchivedObject(ofClass: CKServerChangeToken.self, from: $0)
+        }
+        var token = savedToken
+        var changed = false
+        while true {
+            do {
+                let fetchedPage = try await database.recordZoneChanges(inZoneWith: libraryZoneID, since: token)
+                var modifications: [CKRecord] = []
+                for (_, result) in fetchedPage.modificationResultsByID {
+                    modifications.append(try result.get().record)
+                }
+                let deletions = fetchedPage.deletions.map(\.recordID)
+                if !modifications.isEmpty { onRecordsChanged(modifications) }
+                if !deletions.isEmpty { onRecordsDeleted(deletions) }
+                changed = changed || !modifications.isEmpty || !deletions.isEmpty
+                if !modifications.isEmpty || !deletions.isEmpty { onPageApplied() }
+                token = fetchedPage.changeToken
+                if !fetchedPage.moreComing { break }
+            } catch let error as CKError where error.code == .changeTokenExpired {
+                UserDefaults.standard.removeObject(forKey: key)
+                token = nil
+                continue
+            }
+        }
+        if let token, let data = try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+        return changed
+    }
+
     func asset(from data: Data, id: UUID) throws -> (CKAsset, URL) {
         try asset(from: data, name: id.uuidString)
     }
@@ -358,6 +282,74 @@ final class CloudKitManager: @unchecked Sendable, CKSyncEngineDelegate {
             .appendingPathComponent("hetpaste-cloudkit-\(name)-\(UUID().uuidString)")
         try data.write(to: url, options: .atomic)
         return (CKAsset(fileURL: url), url)
+    }
+
+    /// CKAsset instances belong to one CKRecord only. When a legacy record is
+    /// copied into the custom zone (or a conflict is retried), make a new asset
+    /// backed by a separate temporary file rather than assigning the existing
+    /// CKAsset instance to another record.
+    @discardableResult
+    private func copyFields(from source: CKRecord, to destination: CKRecord) throws -> [URL] {
+        var temporaryAssetURLs: [URL] = []
+        do {
+            for key in source.allKeys() {
+                guard let asset = source[key] as? CKAsset else {
+                    destination[key] = source[key]
+                    continue
+                }
+
+                guard let sourceURL = asset.fileURL else {
+                    // An unavailable asset cannot be copied safely. Leaving the
+                    // destination field empty is preferable to crashing or
+                    // corrupting the whole migration.
+                    destination[key] = nil
+                    continue
+                }
+
+                let copiedURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("hetpaste-cloudkit-copy-\(UUID().uuidString)")
+                try FileManager.default.copyItem(at: sourceURL, to: copiedURL)
+                destination[key] = CKAsset(fileURL: copiedURL)
+                temporaryAssetURLs.append(copiedURL)
+            }
+            return temporaryAssetURLs
+        } catch {
+            removeTemporaryAssets(at: temporaryAssetURLs)
+            throw error
+        }
+    }
+
+    private func removeTemporaryAssets(at urls: [URL]) {
+        for url in urls { try? FileManager.default.removeItem(at: url) }
+    }
+
+    private func prepareLibraryZone() async throws {
+        guard !isPrepared else { return }
+        if let preparationTask {
+            try await preparationTask.value
+            return
+        }
+        let task = Task { [unowned self] in
+            do { _ = try await database.modifyRecordZones(saving: [CKRecordZone(zoneID: libraryZoneID)], deleting: []) }
+            catch let error as CKError where error.code == .serverRejectedRequest { /* zone already exists */ }
+            try await installSubscription()
+        }
+        preparationTask = task
+        defer { preparationTask = nil }
+        try await task.value
+        isPrepared = true
+    }
+
+
+
+    private func installSubscription() async throws {
+        let id = "clipboard-library-zone-changes"
+        let subscription = CKRecordZoneSubscription(zoneID: libraryZoneID, subscriptionID: id)
+        let info = CKSubscription.NotificationInfo()
+        info.shouldSendContentAvailable = true
+        subscription.notificationInfo = info
+        do { _ = try await database.modifySubscriptions(saving: [subscription], deleting: []) }
+        catch let error as CKError where error.code == .serverRejectedRequest || error.code == .unknownItem { return }
     }
 }
 

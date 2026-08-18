@@ -85,9 +85,8 @@ final class ClipboardRepository {
                     record["storagePath"] = manifest.storagePath
                 }
             }
-            // Assets are now managed by CloudKitManager and deleted when CKSyncEngine finishes with them.
-            cloud.save(record)
-            savedRecord = record
+            defer { if let temp { try? FileManager.default.removeItem(at: temp) } }
+            savedRecord = try await cloud.save(record)
         } catch {
             // Keep completed chunks and their durable progress state. A quit,
             // network loss, or retry-after response can resume exactly where
@@ -126,7 +125,7 @@ final class ClipboardRepository {
     func updateThumbnail(id: UUID, data: Data) async throws {
         guard let record = try await cloud.record(type: CloudRecordType.clipboardItem, id: id) else { return }
         record["thumbnailData"] = data
-        cloud.save(record)
+        _ = try await cloud.save(record)
     }
     func updateSearchContext(id: UUID, context: String, sourceHash: String) async throws { try await mutate(id) { $0["searchContext"] = context; $0["contextSourceHash"] = sourceHash } }
     func cachedSearchContext(sourceHash: String) async throws -> String? {
@@ -237,8 +236,8 @@ final class ClipboardRepository {
     }
 
     func fetchFolders() async throws -> [ClipboardFolder] { try await cloud.fetchAll(type: CloudRecordType.folder, sort: [NSSortDescriptor(key: "createdAt", ascending: true)]).compactMap { try? ClipboardFolder(cloudRecord: $0) } }
-    func createFolder(id: UUID, name: String, createdAt: Date = Date(), updatedAt: Date = Date()) async throws { cloud.save(ClipboardFolder(id: id, name: name, createdAt: createdAt, updatedAt: updatedAt).cloudRecord()) }
-    func renameFolder(id: UUID, name: String) async throws { guard let r = try await cloud.record(type: CloudRecordType.folder, id: id) else { return }; r["name"] = name; r["updatedAt"] = Date(); cloud.save(r) }
+    func createFolder(id: UUID, name: String, createdAt: Date = Date(), updatedAt: Date = Date()) async throws { _ = try await cloud.save(ClipboardFolder(id: id, name: name, createdAt: createdAt, updatedAt: updatedAt).cloudRecord()) }
+    func renameFolder(id: UUID, name: String) async throws { guard let r = try await cloud.record(type: CloudRecordType.folder, id: id) else { return }; r["name"] = name; r["updatedAt"] = Date(); _ = try await cloud.save(r) }
     func deleteFolder(id: UUID) async throws { for item in try await fetchAll().filter({ $0.folderIDs.contains(id) }) { try await removeFromFolder(id: item.id, folderID: id) }; try await cloud.delete(type: CloudRecordType.folder, id: id) }
 
     func fetchChains() async throws -> [Chain] { try await cloud.fetchAll(type: CloudRecordType.chain, sort: [NSSortDescriptor(key: "createdAt", ascending: true)]).compactMap { r in guard let id = r.string("uuid").flatMap(UUID.init(uuidString:)), let name = r.string("name") else { return nil }; return Chain(id: id, name: name, createdAt: r.date("createdAt") ?? Date(), updatedAt: r.date("updatedAt") ?? Date()) } }
@@ -247,13 +246,13 @@ final class ClipboardRepository {
         let records = try await cloud.records(matching: q)
         return records.compactMap { try? $0.1.get() }.compactMap { r in guard let id = r.string("uuid").flatMap(UUID.init(uuidString:)), let snippet = r.string("snippetID").flatMap(UUID.init(uuidString:)) else { return nil }; return ChainItem(id: id, chainID: chainID, snippetID: snippet, position: r.int("position") ?? 0) }
     }
-    func createChain(id: UUID, name: String, createdAt: Date = Date(), updatedAt: Date = Date()) async throws { let r = CKRecord(recordType: CloudRecordType.chain, recordID: cloud.recordID(type: CloudRecordType.chain, id: id)); r["uuid"] = id.uuidString; r["name"] = name; r["createdAt"] = createdAt; r["updatedAt"] = updatedAt; cloud.save(r) }
-    func addChainItems(_ items: [ChainItem], chainID: UUID) async throws { for item in items { let r = CKRecord(recordType: CloudRecordType.chainItem, recordID: cloud.recordID(type: CloudRecordType.chainItem, id: item.id)); r["uuid"] = item.id.uuidString; r["chainID"] = chainID.uuidString; r["snippetID"] = item.snippetID.uuidString; r["position"] = item.position as NSNumber; r["createdAt"] = Date(); cloud.save(r) } }
-    func renameChain(id: UUID, name: String) async throws { guard let r = try await cloud.record(type: CloudRecordType.chain, id: id) else { return }; r["name"] = name; r["updatedAt"] = Date(); cloud.save(r) }
+    func createChain(id: UUID, name: String, createdAt: Date = Date(), updatedAt: Date = Date()) async throws { let r = CKRecord(recordType: CloudRecordType.chain, recordID: cloud.recordID(type: CloudRecordType.chain, id: id)); r["uuid"] = id.uuidString; r["name"] = name; r["createdAt"] = createdAt; r["updatedAt"] = updatedAt; _ = try await cloud.save(r) }
+    func addChainItems(_ items: [ChainItem], chainID: UUID) async throws { for item in items { let r = CKRecord(recordType: CloudRecordType.chainItem, recordID: cloud.recordID(type: CloudRecordType.chainItem, id: item.id)); r["uuid"] = item.id.uuidString; r["chainID"] = chainID.uuidString; r["snippetID"] = item.snippetID.uuidString; r["position"] = item.position as NSNumber; r["createdAt"] = Date(); _ = try await cloud.save(r) } }
+    func renameChain(id: UUID, name: String) async throws { guard let r = try await cloud.record(type: CloudRecordType.chain, id: id) else { return }; r["name"] = name; r["updatedAt"] = Date(); _ = try await cloud.save(r) }
     func deleteChainItems(chainID: UUID) async throws { try await cloud.deleteAll(type: CloudRecordType.chainItem, matching: NSPredicate(format: "chainID == %@", chainID.uuidString)) }
     func deleteChain(id: UUID) async throws { try await deleteChainItems(chainID: id); try await cloud.delete(type: CloudRecordType.chain, id: id) }
 
-    private func mutate(_ id: UUID, _ body: (CKRecord) -> Void) async throws { guard let r = try await cloud.record(type: CloudRecordType.clipboardItem, id: id) else { return }; body(r); r["updatedAt"] = Date(); cloud.save(r) }
+    private func mutate(_ id: UUID, _ body: (CKRecord) -> Void) async throws { guard let r = try await cloud.record(type: CloudRecordType.clipboardItem, id: id) else { return }; body(r); r["updatedAt"] = Date(); _ = try await cloud.save(r) }
     private func uploadChunks(_ data: Data, parentID: UUID, kind: CloudChunkManifest.Kind) async throws -> CloudChunkManifest {
         await LargeTransferScheduler.shared.acquire()
         defer { Task { await LargeTransferScheduler.shared.release() } }
@@ -273,7 +272,7 @@ final class ClipboardRepository {
                 let chunk = data.subdata(in: lower..<upper)
                 let name = Self.chunkRecordName(parentID: parentID, manifest: manifest, index: index)
                 let pair = try cloud.asset(from: chunk, name: name)
-                // Asset file cleanup is handled by CloudKitManager once the sync engine finishes.
+                defer { try? FileManager.default.removeItem(at: pair.1) }
                 let record = CKRecord(recordType: CloudRecordType.clipboardAssetChunk,
                                       recordID: cloud.recordID(type: CloudRecordType.clipboardAssetChunk, recordName: name))
                 record["parentID"] = parentID.uuidString
@@ -281,7 +280,7 @@ final class ClipboardRepository {
                 record["byteCount"] = chunk.count as NSNumber
                 record["createdAt"] = Date()
                 record["asset"] = pair.0
-                cloud.save(record)
+                _ = try await cloud.save(record)
                 CloudChunkTransferStore.shared.markCompleted(itemID: parentID, index: index)
                 CloudSyncDiagnostics.shared.advanceLargeTransfer(by: Int64(chunk.count))
                 // Cooperate with the UI and normal CloudKit work between chunks.
