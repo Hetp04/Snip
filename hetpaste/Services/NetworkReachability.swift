@@ -15,6 +15,14 @@ final class NetworkReachability {
     private var started = false
     private let lock = NSLock()
 
+    /// A path is only a transport hint, not proof that CloudKit is healthy.
+    /// It is useful for avoiding needless periodic delta checks while offline.
+    var isOnline: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return wasOnline
+    }
+
     func start() {
         lock.lock()
         defer { lock.unlock() }

@@ -60,11 +60,14 @@ final class ClipboardHistoryViewModel: ObservableObject {
     private var pendingChainDeletionIDs: Set<UUID> = []
     private var retryTask: Task<Void, Never>?
     private var metadataPersistenceTask: Task<Void, Never>?
+    private var automaticSyncTask: Task<Void, Never>?
     private var followUpRemoteSyncRequested = false
     private var clipboardCaptureStateCancellable: AnyCancellable?
 
     private let retryNotBeforeKey = "cloudkit.retry-not-before"
+    private let quotaRetryAttemptKey = "cloudkit.quota-retry-attempt"
     private let initialPageSize = 80
+    private let automaticSyncInterval: Duration = .seconds(30)
     @Published private(set) var hasMoreCachedItems = false
     @Published private(set) var isLoadingMoreItems = false
     init() {
@@ -111,7 +114,28 @@ final class ClipboardHistoryViewModel: ObservableObject {
             }
         service.start()
         Task { await loadHistory() }
+        startAutomaticSyncLoop()
+    }
 
+    deinit {
+        automaticSyncTask?.cancel()
+        retryTask?.cancel()
+        metadataPersistenceTask?.cancel()
+    }
+
+    /// CloudKit subscriptions are the fast path. This modest fallback keeps a
+    /// running menu-bar app convergent even if macOS coalesces or delays a push
+    /// notification, without polling while the device is offline.
+    private func startAutomaticSyncLoop() {
+        automaticSyncTask?.cancel()
+        automaticSyncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: self?.automaticSyncInterval ?? .seconds(30))
+                guard !Task.isCancelled, let self else { return }
+                guard NetworkReachability.shared.isOnline else { continue }
+                self.handleRemoteCloudChange()
+            }
+        }
     }
 
     func toggleClipboardCapturePaused() {
@@ -228,8 +252,14 @@ final class ClipboardHistoryViewModel: ObservableObject {
             // Only states whose source is gone are safe to reclaim here.
             await repository.cleanupAbandonedChunkTransfers()
             CloudSyncDiagnostics.shared.recordSuccess()
-            
-            eagerlyFetchAssetsAndMetadata()
+            if pendingItemIDs.isEmpty,
+               pendingFolderIDs.isEmpty,
+               pendingDeletionIDs.isEmpty,
+               pendingFolderDeletionIDs.isEmpty,
+               pendingChainIDs.isEmpty,
+               pendingChainDeletionIDs.isEmpty {
+                UserDefaults.standard.removeObject(forKey: quotaRetryAttemptKey)
+            }
         } catch {
             loadError = cloudErrorMessage(error)
             cloudSyncState = isTransientCloudError(error) ? .offline : .failed(cloudErrorMessage(error))
@@ -243,7 +273,11 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
     }
 
-    func syncNow() { Task { await loadHistory() } }
+    func syncNow() {
+        // Explicit user intent may bypass a previously scheduled backoff.
+        UserDefaults.standard.removeObject(forKey: retryNotBeforeKey)
+        Task { await loadHistory() }
+    }
 
     private func reloadVisibleLibraryPage() {
         let local = LibraryMetadataStore.shared.loadInitial(itemLimit: initialPageSize)
@@ -449,6 +483,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
             pendingItemIDs.insert(item.id)
             persistLibraryCache()
             cloudSyncState = isTransientCloudError(error) ? .offline : .failed(error.localizedDescription)
+            handleCloudFailure(error)
             print("❌ Clipboard iCloud save error: \(error.localizedDescription)")
             return false
         }
@@ -944,26 +979,6 @@ final class ClipboardHistoryViewModel: ObservableObject {
     func retryAssetDownload(for item: ClipboardItem) {
         assetLoadErrors[item.id] = nil
         loadLocalDataIfNeeded(for: item)
-    }
-    
-    private func eagerlyFetchAssetsAndMetadata() {
-        Task { [weak self] in
-            guard let self else { return }
-            let recentItems = await MainActor.run { self.items }
-            
-            for item in recentItems {
-                if item.contentType == .image || item.contentType == .file || item.contentType == .video {
-                    if item.localData == nil && item.storagePath != nil {
-                        await MainActor.run { self.loadLocalDataIfNeeded(for: item) }
-                    }
-                } else if item.contentType == .url {
-                    if let text = item.contentText, let url = URL(string: text), let host = url.host {
-                        IconCache.shared.fetchFavicon(forHost: host) { _ in }
-                        await LinkPreviewCache.shared.fetchMetadataIfNeeded(for: url, host: host)
-                    }
-                }
-            }
-        }
     }
     
     func toggleFavorite(_ item: ClipboardItem) {
@@ -1542,10 +1557,24 @@ final class ClipboardHistoryViewModel: ObservableObject {
     }
     private func handleCloudFailure(_ error: Error) {
         CloudSyncDiagnostics.shared.recordFailure(error)
-        guard let cloudError = error as? CKError,
-              let seconds = (cloudError as NSError).userInfo[CKErrorRetryAfterKey] as? NSNumber
-        else { return }
-        let retryAt = Date().addingTimeInterval(seconds.doubleValue)
+        guard let cloudError = error as? CKError else { return }
+
+        // CloudKit's own retry deadline always takes precedence.
+        if let seconds = (cloudError as NSError).userInfo[CKErrorRetryAfterKey] as? NSNumber {
+            let retryAt = Date().addingTimeInterval(seconds.doubleValue)
+            UserDefaults.standard.set(retryAt, forKey: retryNotBeforeKey)
+            scheduleRetry(at: retryAt)
+            return
+        }
+
+        // Apple does not notify an app when a user frees private iCloud
+        // storage. Keep the mutation durable and retry conservatively while
+        // the app is running: 5, 10, 20, 40, then at most once an hour.
+        guard cloudError.code == .quotaExceeded else { return }
+        let attempt = UserDefaults.standard.integer(forKey: quotaRetryAttemptKey)
+        let delay = min(3600.0, 300.0 * Double(1 << min(attempt, 3)))
+        UserDefaults.standard.set(attempt + 1, forKey: quotaRetryAttemptKey)
+        let retryAt = Date().addingTimeInterval(delay)
         UserDefaults.standard.set(retryAt, forKey: retryNotBeforeKey)
         scheduleRetry(at: retryAt)
     }
