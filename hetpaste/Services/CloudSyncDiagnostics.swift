@@ -10,6 +10,9 @@ final class CloudSyncDiagnostics: ObservableObject {
 
     @Published private(set) var lastSuccessfulSync: Date?
     @Published private(set) var lastError: String?
+    @Published private(set) var lastSyncSource = "—"
+    @Published private(set) var lastPushReceivedAt: Date?
+    @Published private(set) var lastImportedChangeCount = 0
     @Published private(set) var nextRetryAt: Date?
     @Published private(set) var queuedOperationCount = 0
     @Published private(set) var transferCompletedBytes: Int64 = 0
@@ -29,7 +32,8 @@ final class CloudSyncDiagnostics: ObservableObject {
         wardrobeQueueCount = count
         queuedOperationCount = libraryQueueCount + wardrobeQueueCount
     }
-    func recordSuccess() { lastSuccessfulSync = Date(); lastError = nil; nextRetryAt = nil }
+    func recordSuccess(source: String = "foreground", importedChanges: Int = 0) { lastSuccessfulSync = Date(); lastError = nil; nextRetryAt = nil; lastSyncSource = source; lastImportedChangeCount = importedChanges }
+    func recordPushReceived() { lastPushReceivedAt = Date() }
 
     func beginLargeTransfer(totalBytes: Int64, completedBytes: Int64 = 0) {
         transferTotalBytes = totalBytes

@@ -11,13 +11,6 @@ struct OCRBox: Codable, Equatable {
     let height: Double
 }
 
-enum OCRStatus: String, Codable {
-    case pending
-    case done
-    case none
-    case failed
-}
-
 // MARK: - Service
 
 actor OCRService {

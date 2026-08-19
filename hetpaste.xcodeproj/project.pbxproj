@@ -19,15 +19,91 @@
 			remoteGlobalIDString = 33AECBFF2FD0CA50007AA64D;
 			remoteInfo = hetpaste;
 		};
+		338A90A230364FC5005CBCDE /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 33AECBF82FD0CA50007AA64D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 338A909430364FC2005CBCDE;
+			remoteInfo = "hetpaste-iOS";
+		};
+		338A90AC30364FC5005CBCDE /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 33AECBF82FD0CA50007AA64D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 338A909430364FC2005CBCDE;
+			remoteInfo = "hetpaste-iOS";
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		33355115303277F3003A2073 /* hetpasteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = hetpasteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		338A909530364FC2005CBCDE /* hetpaste-iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hetpaste-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		338A90A130364FC5005CBCDE /* hetpaste-iOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "hetpaste-iOSTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		338A90AB30364FC5005CBCDE /* hetpaste-iOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "hetpaste-iOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		3392DA1B2FD1088600F66EDF /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = "<group>"; };
 		33AECC002FD0CA50007AA64D /* hetpaste.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = hetpaste.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		338A909030364FC2005CBCDE /* Exceptions for "hetpaste" folder in "hetpaste-iOS" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				App/AppDelegate.swift,
+				App/hetpasteApp.swift,
+				Assets.xcassets,
+				Info.plist,
+				macOS/Platform/MacClipboardProvider.swift,
+				Services/ClipboardService.swift,
+				Services/HotkeyManager.swift,
+				Services/OCRService.swift,
+				Services/OpenAIOCRService.swift,
+				Utilities/CodeLanguageDetector.swift,
+				Utilities/FileIconCache.swift,
+				Utilities/highlight.min.js,
+				Utilities/IconCache.swift,
+				Utilities/MenuBarDropView.swift,
+				Utilities/Neumorphic/ColorExtension.swift,
+				Utilities/Neumorphic/NeumorphicKit.swift,
+				Utilities/Neumorphic/README_SoftNeumorphicIcons.md,
+				Utilities/Neumorphic/SoftButtonStyle.swift,
+				Utilities/Neumorphic/SoftDynamicToggleStyle.swift,
+				Utilities/Neumorphic/SoftInnerShadowViewModifier.swift,
+				Utilities/Neumorphic/SoftNeumorphicIcon.swift,
+				Utilities/Neumorphic/SoftOuterShadowViewModifier.swift,
+				"Utilities/Neumorphic/View+InverseMask.swift",
+				Utilities/QuickLookPreviewer.swift,
+				ViewModels/ClipboardHistoryViewModel.swift,
+				ViewModels/PsychoCopyManager.swift,
+				ViewModels/SettingsViewModel.swift,
+				ViewModels/WardrobeViewModel.swift,
+				Views/ChainView.swift,
+				Views/ClipboardItemRow.swift,
+				Views/ContentView.swift,
+				Views/ExpandedTextSnippetView.swift,
+				Views/ImageTextViewerWindow.swift,
+				Views/LaunchpadView.swift,
+				Views/MenuBarPopoverView.swift,
+				Views/OptionalScrollModifier.swift,
+				Views/PsychoCopyHUDView.swift,
+				Views/QuickClipboardStripView.swift,
+				Views/RichTextCodeView.swift,
+				Views/RichTextEditorView.swift,
+				Views/SearchBarView.swift,
+				Views/SettingsView.swift,
+				Views/ShortcutsSettingsView.swift,
+				Views/SidebarView.swift,
+				Views/TrashView.swift,
+				Views/WardrobeView.swift,
+			);
+			target = 338A909430364FC2005CBCDE /* hetpaste-iOS */;
+		};
+		A1B2C3D4E5F60708090A0B0C /* Exceptions for "hetpaste-iOS" folder in "hetpaste-iOS" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 338A909430364FC2005CBCDE /* hetpaste-iOS */;
+		};
 		3392DA1A2FD1076000F66EDF /* Exceptions for "hetpaste" folder in "hetpaste" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -43,10 +119,29 @@
 			path = hetpasteTests;
 			sourceTree = "<group>";
 		};
+		338A909630364FC2005CBCDE /* hetpaste-iOS */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A1B2C3D4E5F60708090A0B0C /* Exceptions for "hetpaste-iOS" folder in "hetpaste-iOS" target */,
+			);
+			path = "hetpaste-iOS";
+			sourceTree = "<group>";
+		};
+		338A90A430364FC5005CBCDE /* hetpaste-iOSTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "hetpaste-iOSTests";
+			sourceTree = "<group>";
+		};
+		338A90AE30364FC5005CBCDE /* hetpaste-iOSUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "hetpaste-iOSUITests";
+			sourceTree = "<group>";
+		};
 		33AECC022FD0CA50007AA64D /* hetpaste */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				3392DA1A2FD1076000F66EDF /* Exceptions for "hetpaste" folder in "hetpaste" target */,
+				338A909030364FC2005CBCDE /* Exceptions for "hetpaste" folder in "hetpaste-iOS" target */,
 			);
 			path = hetpaste;
 			sourceTree = "<group>";
@@ -55,6 +150,27 @@
 
 /* Begin PBXFrameworksBuildPhase section */
 		33355112303277F3003A2073 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		338A909230364FC2005CBCDE /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		338A909E30364FC5005CBCDE /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		338A90A830364FC5005CBCDE /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -72,6 +188,16 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		338A96CA30365606005CBCDE /* Recovered References */ = {
+			isa = PBXGroup;
+			children = (
+				33355116303277F3003A2073 /* hetpasteTests */,
+				338A90A430364FC5005CBCDE /* hetpaste-iOSTests */,
+				338A90AE30364FC5005CBCDE /* hetpaste-iOSUITests */,
+			);
+			name = "Recovered References";
+			sourceTree = "<group>";
+		};
 		3392DA162FD1062D00F66EDF /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
@@ -83,10 +209,11 @@
 			isa = PBXGroup;
 			children = (
 				33AECC022FD0CA50007AA64D /* hetpaste */,
-				33355116303277F3003A2073 /* hetpasteTests */,
+				338A909630364FC2005CBCDE /* hetpaste-iOS */,
 				3392DA162FD1062D00F66EDF /* Frameworks */,
 				33AECC012FD0CA50007AA64D /* Products */,
 				3392DA1B2FD1088600F66EDF /* Config.xcconfig */,
+				338A96CA30365606005CBCDE /* Recovered References */,
 			);
 			sourceTree = "<group>";
 		};
@@ -95,6 +222,9 @@
 			children = (
 				33AECC002FD0CA50007AA64D /* hetpaste.app */,
 				33355115303277F3003A2073 /* hetpasteTests.xctest */,
+				338A909530364FC2005CBCDE /* hetpaste-iOS.app */,
+				338A90A130364FC5005CBCDE /* hetpaste-iOSTests.xctest */,
+				338A90AB30364FC5005CBCDE /* hetpaste-iOSUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -124,6 +254,75 @@
 			productName = hetpasteTests;
 			productReference = 33355115303277F3003A2073 /* hetpasteTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		338A909430364FC2005CBCDE /* hetpaste-iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 338A90B930364FC5005CBCDE /* Build configuration list for PBXNativeTarget "hetpaste-iOS" */;
+			buildPhases = (
+				338A909130364FC2005CBCDE /* Sources */,
+				338A909230364FC2005CBCDE /* Frameworks */,
+				338A909330364FC2005CBCDE /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				338A909630364FC2005CBCDE /* hetpaste-iOS */,
+				33AECC022FD0CA50007AA64D /* hetpaste */,
+			);
+			name = "hetpaste-iOS";
+			packageProductDependencies = (
+			);
+			productName = "hetpaste-iOS";
+			productReference = 338A909530364FC2005CBCDE /* hetpaste-iOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		338A90A030364FC5005CBCDE /* hetpaste-iOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 338A90BA30364FC5005CBCDE /* Build configuration list for PBXNativeTarget "hetpaste-iOSTests" */;
+			buildPhases = (
+				338A909D30364FC5005CBCDE /* Sources */,
+				338A909E30364FC5005CBCDE /* Frameworks */,
+				338A909F30364FC5005CBCDE /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				338A90A330364FC5005CBCDE /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				338A90A430364FC5005CBCDE /* hetpaste-iOSTests */,
+			);
+			name = "hetpaste-iOSTests";
+			packageProductDependencies = (
+			);
+			productName = "hetpaste-iOSTests";
+			productReference = 338A90A130364FC5005CBCDE /* hetpaste-iOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		338A90AA30364FC5005CBCDE /* hetpaste-iOSUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 338A90BB30364FC5005CBCDE /* Build configuration list for PBXNativeTarget "hetpaste-iOSUITests" */;
+			buildPhases = (
+				338A90A730364FC5005CBCDE /* Sources */,
+				338A90A830364FC5005CBCDE /* Frameworks */,
+				338A90A930364FC5005CBCDE /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				338A90AD30364FC5005CBCDE /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				338A90AE30364FC5005CBCDE /* hetpaste-iOSUITests */,
+			);
+			name = "hetpaste-iOSUITests";
+			packageProductDependencies = (
+			);
+			productName = "hetpaste-iOSUITests";
+			productReference = 338A90AB30364FC5005CBCDE /* hetpaste-iOSUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 		33AECBFF2FD0CA50007AA64D /* hetpaste */ = {
 			isa = PBXNativeTarget;
@@ -162,6 +361,17 @@
 						CreatedOnToolsVersion = 26.3;
 						TestTargetID = 33AECBFF2FD0CA50007AA64D;
 					};
+					338A909430364FC2005CBCDE = {
+						CreatedOnToolsVersion = 26.3;
+					};
+					338A90A030364FC5005CBCDE = {
+						CreatedOnToolsVersion = 26.3;
+						TestTargetID = 338A909430364FC2005CBCDE;
+					};
+					338A90AA30364FC5005CBCDE = {
+						CreatedOnToolsVersion = 26.3;
+						TestTargetID = 338A909430364FC2005CBCDE;
+					};
 					33AECBFF2FD0CA50007AA64D = {
 						CreatedOnToolsVersion = 26.3;
 						SystemCapabilities = {
@@ -191,12 +401,36 @@
 			targets = (
 				33AECBFF2FD0CA50007AA64D /* hetpaste */,
 				33355114303277F3003A2073 /* hetpasteTests */,
+				338A909430364FC2005CBCDE /* hetpaste-iOS */,
+				338A90A030364FC5005CBCDE /* hetpaste-iOSTests */,
+				338A90AA30364FC5005CBCDE /* hetpaste-iOSUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		33355113303277F3003A2073 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		338A909330364FC2005CBCDE /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		338A909F30364FC5005CBCDE /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		338A90A930364FC5005CBCDE /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -221,6 +455,27 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		338A909130364FC2005CBCDE /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		338A909D30364FC5005CBCDE /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		338A90A730364FC5005CBCDE /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		33AECBFC2FD0CA50007AA64D /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -235,6 +490,16 @@
 			isa = PBXTargetDependency;
 			target = 33AECBFF2FD0CA50007AA64D /* hetpaste */;
 			targetProxy = 33355119303277F3003A2073 /* PBXContainerItemProxy */;
+		};
+		338A90A330364FC5005CBCDE /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 338A909430364FC2005CBCDE /* hetpaste-iOS */;
+			targetProxy = 338A90A230364FC5005CBCDE /* PBXContainerItemProxy */;
+		};
+		338A90AD30364FC5005CBCDE /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 338A909430364FC2005CBCDE /* hetpaste-iOS */;
+			targetProxy = 338A90AC30364FC5005CBCDE /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -276,6 +541,173 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hetpaste.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/hetpaste";
+			};
+			name = Release;
+		};
+		338A90B330364FC5005CBCDE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "hetpaste-iOS/hetpaste-iOS.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K3P52MFF3S;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "hetpaste-iOS/Info.plist";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Her.hetpaste-iOS";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		338A90B430364FC5005CBCDE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "hetpaste-iOS/hetpaste-iOS-Release.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K3P52MFF3S;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "hetpaste-iOS/Info.plist";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Her.hetpaste-iOS";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		338A90B530364FC5005CBCDE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K3P52MFF3S;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Her.hetpaste-iOSTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hetpaste-iOS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/hetpaste-iOS";
+			};
+			name = Debug;
+		};
+		338A90B630364FC5005CBCDE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K3P52MFF3S;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Her.hetpaste-iOSTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hetpaste-iOS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/hetpaste-iOS";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		338A90B730364FC5005CBCDE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K3P52MFF3S;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Her.hetpaste-iOSUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "hetpaste-iOS";
+			};
+			name = Debug;
+		};
+		338A90B830364FC5005CBCDE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K3P52MFF3S;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Her.hetpaste-iOSUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "hetpaste-iOS";
+				VALIDATE_PRODUCT = YES;
 			};
 			name = Release;
 		};
@@ -444,7 +876,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = hetpaste/hetpaste.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "hetpaste/hetpaste-Release.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -485,6 +917,33 @@
 			buildConfigurations = (
 				3335511C303277F3003A2073 /* Debug */,
 				3335511D303277F3003A2073 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		338A90B930364FC5005CBCDE /* Build configuration list for PBXNativeTarget "hetpaste-iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				338A90B330364FC5005CBCDE /* Debug */,
+				338A90B430364FC5005CBCDE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		338A90BA30364FC5005CBCDE /* Build configuration list for PBXNativeTarget "hetpaste-iOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				338A90B530364FC5005CBCDE /* Debug */,
+				338A90B630364FC5005CBCDE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		338A90BB30364FC5005CBCDE /* Build configuration list for PBXNativeTarget "hetpaste-iOSUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				338A90B730364FC5005CBCDE /* Debug */,
+				338A90B830364FC5005CBCDE /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

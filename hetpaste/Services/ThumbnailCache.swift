@@ -1,4 +1,8 @@
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 import Foundation
 
 /// A small, persistent visual preview for image cards. It is intentionally
@@ -31,6 +35,7 @@ final class ThumbnailCache {
     }
 
     func createAndStore(from sourceData: Data, for id: UUID) {
+        #if canImport(AppKit)
         guard let image = NSImage(data: sourceData), image.size.width > 0, image.size.height > 0 else { return }
         let scale = min(1, maximumDimension / max(image.size.width, image.size.height))
         let targetSize = NSSize(width: max(1, floor(image.size.width * scale)), height: max(1, floor(image.size.height * scale)))
@@ -42,6 +47,17 @@ final class ThumbnailCache {
               let bitmap = NSBitmapImageRep(data: tiff),
               let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.78]) else { return }
         store(jpeg, for: id)
+        #elseif canImport(UIKit)
+        guard let image = UIImage(data: sourceData), image.size.width > 0, image.size.height > 0 else { return }
+        let scale = min(1, maximumDimension / max(image.size.width, image.size.height))
+        let targetSize = CGSize(width: max(1, floor(image.size.width * scale)), height: max(1, floor(image.size.height * scale)))
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        let thumbnail = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        guard let jpeg = thumbnail.jpegData(compressionQuality: 0.78) else { return }
+        store(jpeg, for: id)
+        #endif
     }
 
     private func url(for id: UUID) -> URL {

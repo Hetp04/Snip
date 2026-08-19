@@ -15,23 +15,43 @@ private enum CloudBatchDeletionInternalError: Error {
 /// temporary CKRecord instances. CloudKit's server-record-changed error is
 /// resolved last-writer-wins using each model's updated timestamp.
 final class CloudKitManager {
+    static let containerIdentifier = "iCloud.Her.hetpaste"
     static let shared = CloudKitManager()
 
     let container: CKContainer
     let database: CKDatabase
     let libraryZoneID = CKRecordZone.ID(zoneName: "ClipboardLibrary")
+    private let stateLock = NSLock()
     private var isPrepared = false
     private var preparationTask: Task<Void, Error>?
+    private var lastVerifiedAccountAt: Date?
 
-    private init(container: CKContainer = .default()) {
+    private init(container: CKContainer = CKContainer(identifier: containerIdentifier)) {
         self.container = container
         self.database = container.privateCloudDatabase
     }
 
     func verifyAccount() async throws {
-        let status = try await container.accountStatus()
-        guard status == .available else { throw CloudKitPersistenceError.accountUnavailable(status) }
+        stateLock.lock()
+        let isFresh = lastVerifiedAccountAt.map { Date().timeIntervalSince($0) < 30 } ?? false
+        stateLock.unlock()
+        if !isFresh {
+            let status = try await container.accountStatus()
+            guard status == .available else { throw CloudKitPersistenceError.accountUnavailable(status) }
+            stateLock.lock(); lastVerifiedAccountAt = Date(); stateLock.unlock()
+        }
         try await prepareLibraryZone()
+    }
+
+    /// Stable per-iCloud-account identity used only to separate local caches
+    /// and change tokens after the user changes Apple Accounts on a device.
+    func currentAccountIdentifier() async throws -> String {
+        try await verifyAccount()
+        return try await container.userRecordID().recordName
+    }
+
+    func discardChangeToken() {
+        UserDefaults.standard.removeObject(forKey: "cloudkit.library-zone-change-token")
     }
 
     func record(type: String, id: UUID) async throws -> CKRecord? {
@@ -45,7 +65,7 @@ final class CloudKitManager {
     }
 
     @discardableResult
-    func save(_ record: CKRecord) async throws -> CKRecord {
+    func save(_ record: CKRecord, changedKeys: Set<String>? = nil) async throws -> CKRecord {
         try await verifyAccount()
         do { return try await database.save(record) }
         catch let error as CKError where error.code == .serverRecordChanged {
@@ -56,7 +76,7 @@ final class CloudKitManager {
             let localUpdatedAt = record["updatedAt"] as? Date ?? record.modificationDate ?? .distantPast
             let serverUpdatedAt = server["updatedAt"] as? Date ?? server.modificationDate ?? .distantPast
             guard localUpdatedAt > serverUpdatedAt else { return server }
-            let temporaryAssetURLs = try copyFields(from: record, to: server)
+            let temporaryAssetURLs = try copyFields(from: record, to: server, keys: changedKeys)
             defer { removeTemporaryAssets(at: temporaryAssetURLs) }
             return try await database.save(server)
         }
@@ -70,6 +90,16 @@ final class CloudKitManager {
         try await verifyAccount()
         do { _ = try await database.deleteRecord(withID: recordID(type: type, recordName: recordName)) }
         catch let error as CKError where error.code == .unknownItem { return }
+    }
+
+    func save(records: [CKRecord]) async throws {
+        guard !records.isEmpty else { return }
+        try await verifyAccount()
+        for start in stride(from: 0, to: records.count, by: 200) {
+            let batch = Array(records[start..<min(start + 200, records.count)])
+            let result = try await database.modifyRecords(saving: batch, deleting: [], savePolicy: .ifServerRecordUnchanged, atomically: false)
+            for record in batch { _ = try result.saveResults[record.recordID]?.get() }
+        }
     }
 
     func fetchAll(type: String, sort: [NSSortDescriptor] = []) async throws -> [CKRecord] {
@@ -90,13 +120,13 @@ final class CloudKitManager {
         // first save; callers retain their requested order locally.
         guard let descriptor = sort.first, let key = descriptor.key else { return result }
         return result.sorted { lhs, rhs in
-            let left = lhs[key] as? Date
-            let right = rhs[key] as? Date
+            let left = (lhs[key] as? Date) ?? lhs.creationDate
+            let right = (rhs[key] as? Date) ?? rhs.creationDate
             let ascending = descriptor.ascending
             switch (left, right) {
             case let (left?, right?): return ascending ? left < right : left > right
-            case (_?, nil): return true
-            case (nil, _?): return false
+            case (_?, nil): return !ascending
+            case (nil, _?): return ascending
             case (nil, nil): return false
             }
         }
@@ -252,9 +282,10 @@ final class CloudKitManager {
                 let fetchedPage = try await database.recordZoneChanges(inZoneWith: libraryZoneID, since: token)
                 var modifications: [CKRecord] = []
                 for (_, result) in fetchedPage.modificationResultsByID {
-                    modifications.append(try result.get().record)
+                    let record = try result.get().record
+                    if record.recordType != CloudRecordType.clipboardAssetChunk { modifications.append(record) }
                 }
-                let deletions = fetchedPage.deletions.map(\.recordID)
+                let deletions = fetchedPage.deletions.map(\.recordID).filter { !$0.recordName.hasPrefix("ClipboardAssetChunk.") }
                 if !modifications.isEmpty { onRecordsChanged(modifications) }
                 if !deletions.isEmpty { onRecordsDeleted(deletions) }
                 changed = changed || !modifications.isEmpty || !deletions.isEmpty
@@ -289,10 +320,15 @@ final class CloudKitManager {
     /// backed by a separate temporary file rather than assigning the existing
     /// CKAsset instance to another record.
     @discardableResult
-    private func copyFields(from source: CKRecord, to destination: CKRecord) throws -> [URL] {
+    private func copyFields(from source: CKRecord, to destination: CKRecord, keys: Set<String>?) throws -> [URL] {
         var temporaryAssetURLs: [URL] = []
         do {
-            for key in source.allKeys() {
+            for key in source.allKeys() where keys?.contains(key) ?? true {
+                if key == "folderIDs", let local = source[key] as? [String] {
+                    let serverValues = destination[key] as? [String] ?? []
+                    destination[key] = Array(Set(serverValues).union(local)).sorted()
+                    continue
+                }
                 guard let asset = source[key] as? CKAsset else {
                     destination[key] = source[key]
                     continue
@@ -324,8 +360,9 @@ final class CloudKitManager {
     }
 
     private func prepareLibraryZone() async throws {
-        guard !isPrepared else { return }
-        if let preparationTask {
+        stateLock.lock()
+        if isPrepared { stateLock.unlock(); return }
+        if let preparationTask { stateLock.unlock()
             try await preparationTask.value
             return
         }
@@ -335,9 +372,10 @@ final class CloudKitManager {
             try await installSubscription()
         }
         preparationTask = task
-        defer { preparationTask = nil }
+        stateLock.unlock()
+        defer { stateLock.lock(); preparationTask = nil; stateLock.unlock() }
         try await task.value
-        isPrepared = true
+        stateLock.lock(); isPrepared = true; stateLock.unlock()
     }
 
 
@@ -348,8 +386,11 @@ final class CloudKitManager {
         let info = CKSubscription.NotificationInfo()
         info.shouldSendContentAvailable = true
         subscription.notificationInfo = info
-        do { _ = try await database.modifySubscriptions(saving: [subscription], deleting: []) }
-        catch let error as CKError where error.code == .serverRejectedRequest || error.code == .unknownItem { return }
+        do {
+            _ = try await database.subscription(for: id)
+        } catch let error as CKError where error.code == .unknownItem {
+            _ = try await database.modifySubscriptions(saving: [subscription], deleting: [])
+        }
     }
 }
 

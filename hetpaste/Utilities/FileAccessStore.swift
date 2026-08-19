@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(AppKit)
 import AppKit
+#endif
 final class FileAccessStore {
     static let shared = FileAccessStore()
     private let fm = FileManager.default
@@ -19,6 +21,7 @@ final class FileAccessStore {
         try url.path.write(to: pathFile(for: id), atomically: true, encoding: .utf8)
 
         let bookmarkData: Data
+        #if os(macOS)
         do {
             bookmarkData = try url.bookmarkData(
                 options: [.withSecurityScope],
@@ -32,12 +35,20 @@ final class FileAccessStore {
                 relativeTo: nil
             )
         }
+        #else
+        bookmarkData = try url.bookmarkData(
+            options: [],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+        #endif
         try bookmarkData.write(to: bookmarkPath(for: id), options: .atomic)
     }
     func resolve(for id: UUID) -> URL? {
         let path = bookmarkPath(for: id)
         if let data = try? Data(contentsOf: path) {
             var stale = false
+            #if os(macOS)
             if let url = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale) {
                 if stale {
                     if let newData = try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) {
@@ -46,6 +57,7 @@ final class FileAccessStore {
                 }
                 return url
             }
+            #endif
             stale = false
             if let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) {
                 return url
@@ -59,6 +71,7 @@ final class FileAccessStore {
         }
         return nil
     }
+    #if os(macOS)
     @discardableResult
     func revealInFinder(for id: UUID, fallback: URL?) -> Bool {
         withResolvedURL(for: id, fallback: fallback) { url in
@@ -71,6 +84,7 @@ final class FileAccessStore {
             NSWorkspace.shared.open(url)
         }
     }
+    #endif
     func resolvedURL(for id: UUID, fallback: URL?) -> URL? {
         let url = resolve(for: id) ?? fallback
         guard let url else { return nil }

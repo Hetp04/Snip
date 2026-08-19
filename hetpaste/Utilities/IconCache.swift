@@ -70,6 +70,16 @@ final class IconCache {
         }
         return nil
     }
+
+    func appIconPNGData(bundleID: String) -> Data? {
+        if let hit = cachedAppIcon(bundleID: bundleID) {
+            return pngData(of: hit, targetSize: CGSize(width: 64, height: 64))
+        }
+        if let resolved = resolveAppIcon(bundleID: bundleID) {
+            return pngData(of: resolved, targetSize: CGSize(width: 64, height: 64))
+        }
+        return nil
+    }
     func prime(bundleID: String?, runningIcon: NSImage?) {
         guard let bid = bundleID, let image = runningIcon else { return }
         if cachedAppIcon(bundleID: bid) == nil { saveAppIcon(image, bundleID: bid) }
@@ -328,3 +338,4 @@ private extension NSImage {
         return img
     }
 }
+

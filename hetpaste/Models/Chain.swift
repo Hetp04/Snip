@@ -1,10 +1,10 @@
 import Foundation
 
 struct Chain: Identifiable, Equatable, Codable {
-    var id: UUID
+    var id: UUID = UUID()
     var name: String
-    var createdAt: Date
-    var updatedAt: Date
+    var createdAt: Date = Date()
+    var updatedAt: Date = Date()
 }
 
 struct ChainItem: Identifiable, Equatable, Codable {

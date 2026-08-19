@@ -1,4 +1,6 @@
+#if canImport(AppKit)
 import AppKit
+#endif
 import Foundation
 import SwiftUI
 extension Color {
@@ -91,6 +93,7 @@ extension Color {
         if t < 2.0/3.0 { return p + (q - p) * (2.0/3.0 - t) * 6.0 }
         return p
     }
+    #if os(macOS)
     var isLight: Bool {
         guard let components = NSColor(self).usingColorSpace(.deviceRGB)?.cgColor.components else { return true }
         let r = components[0]
@@ -99,7 +102,13 @@ extension Color {
         let brightness = (r * 299 + g * 587 + b * 114) / 1000
         return brightness > 0.5
     }
+    #else
+    var isLight: Bool {
+        true
+    }
+    #endif
 }
+#if os(macOS)
 extension NSImage {
     func dominantAccentColor() -> Color? {
         guard let cgImage = cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
@@ -136,27 +145,27 @@ extension NSImage {
             let minChannel = min(red, min(green, blue))
             let saturation = maxChannel == 0 ? 0 : (maxChannel - minChannel) / maxChannel
             let brightness = maxChannel
-            let weight = alpha * max(0.2, saturation) * max(0.35, brightness)
+            let weight = alpha * (0.25 + saturation * 0.75) * (0.35 + brightness * 0.65)
             weightedRed += red * weight
             weightedGreen += green * weight
             weightedBlue += blue * weight
             totalWeight += weight
         }
-        guard totalWeight > 0 else { return nil }
-        var red = weightedRed / totalWeight
-        var green = weightedGreen / totalWeight
-        var blue = weightedBlue / totalWeight
-        let color = NSColor(calibratedRed: red, green: green, blue: blue, alpha: 1)
-        var hue: CGFloat = 0
-        var saturation: CGFloat = 0
-        var brightness: CGFloat = 0
-        var alpha: CGFloat = 0
-        color.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
-        saturation = max(saturation, 0.45)
-        brightness = min(max(brightness, 0.42), 0.72)
-        return Color(hue: Double(hue), saturation: Double(saturation), brightness: Double(brightness), opacity: 1)
+        guard totalWeight > 0.001 else { return nil }
+        let avgRed = weightedRed / totalWeight
+        let avgGreen = weightedGreen / totalWeight
+        let avgBlue = weightedBlue / totalWeight
+        let maxComponent = max(avgRed, avgGreen, avgBlue)
+        let minComponent = min(avgRed, min(avgGreen, avgBlue))
+        let saturation = maxComponent == 0 ? 0 : (maxComponent - minComponent) / maxComponent
+        let boostedSat = min(1.0, max(0.42, saturation * 1.35))
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        NSColor(red: avgRed, green: avgGreen, blue: avgBlue, alpha: 1.0).getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        let clampedBrightness = min(0.88, max(0.48, b))
+        return Color(hue: Double(h), saturation: boostedSat, brightness: clampedBrightness)
     }
 }
+#endif
 enum Theme {
     static let bg = Color(hex: "#FAF9F8")
     static let sidebar = Color(hex: "#FAF9F8")
@@ -211,6 +220,28 @@ enum Theme {
         }
     }
 }
+enum AppVisualPalette {
+    static func backgroundTints(for appName: String, fallbackColor: Color) -> (background: Color, fadeTo: Color) {
+        let fadeTo = Color.primary.opacity(0.0)
+        switch appName.lowercased() {
+        case "terminal", "iterm", "iterm2":
+            return (Color(hex: "#242424").opacity(0.18), fadeTo)
+        case "safari":
+            return (Color(hex: "#EBF3FE"), fadeTo)
+        case "slack":
+            return (Color(hex: "#FBEFF3"), fadeTo)
+        case "xcode":
+            return (Color(hex: "#EAF2FD"), fadeTo)
+        case "tableplus":
+            return (Color(hex: "#FFF2E2"), fadeTo)
+        case "code", "vs code", "visual studio code":
+            return (Color(hex: "#E8F3FD"), fadeTo)
+        default:
+            return (fallbackColor.opacity(0.12), fadeTo)
+        }
+    }
+}
+#if os(macOS)
 enum AppVisual {
     private static let iconCache = NSCache<NSString, NSImage>()
     static func lookup(_ appName: String, bundleID: String? = nil) -> (symbol: String, color: Color, icon: NSImage?) {
@@ -248,6 +279,7 @@ enum AppVisual {
         }
     }
 }
+#endif
 extension Date {
     func relativeString() -> String {
         let now = Date()

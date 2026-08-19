@@ -2,12 +2,20 @@ import Foundation
 
 enum SyncStatus: String, Codable { case pending, synced, failed }
 
+enum OCRStatus: String, Codable {
+    case pending
+    case done
+    case none
+    case failed
+}
+
 struct ClipboardItem: Identifiable, Equatable, Codable {
     var id: UUID = UUID()
     var contentType: ContentType
     var contentText: String?
     var sourceAppName: String
     var sourceAppBundleID: String?
+    var appIconData: Data? = nil
     var folderIDs: Set<UUID> = []
     var isPinned: Bool = false
     var createdAt: Date = Date()

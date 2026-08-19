@@ -129,6 +129,7 @@ extension ClipboardItem {
         record["contentText"] = contentText?.cloudKitInlineValue(maximumUTF8Bytes: 512 * 1024)
         record["sourceAppName"] = sourceAppName
         record["sourceBundleID"] = sourceAppBundleID
+        record["appIconData"] = appIconData
         // CloudKit cannot infer a list's element type from an empty value when
         // a development schema is first created. Absence represents no folder.
         record["folderIDs"] = folderIDs.isEmpty ? nil : folderIDs.map(\.uuidString)
@@ -168,6 +169,7 @@ extension ClipboardItem {
         let payload = CloudClipboardPayload.decode(from: record)
         id = uuid; contentType = type; contentText = payload?.contentText ?? record.string("contentText")
         sourceAppName = source; sourceAppBundleID = record.string("sourceBundleID")
+        appIconData = record.data("appIconData")
         folderIDs = record.uuids("folderIDs"); isPinned = record.bool("isPinned")
         createdAt = record.date("createdAt") ?? record.creationDate ?? Date()
         updatedAt = record.date("updatedAt") ?? record.modificationDate ?? createdAt

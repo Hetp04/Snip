@@ -145,9 +145,15 @@ final class ClipboardService: ObservableObject {
         if let bundleID, let icon = sourceApp.icon {
             IconCache.shared.prime(bundleID: bundleID, runningIcon: icon)
         }
+        let iconData: Data? = {
+            guard let bundleID, !bundleID.isEmpty else { return nil }
+            return IconCache.shared.appIconPNGData(bundleID: bundleID)
+        }()
         if !snapshot.fileURLs.isEmpty {
             return snapshot.fileURLs.compactMap { fileURL in
-                captureFile(at: fileURL, appName: appName, bundleID: bundleID)
+                var item = captureFile(at: fileURL, appName: appName, bundleID: bundleID)
+                item.appIconData = iconData
+                return item
             }
         }
         if let imageData = resolvedImageData(png: snapshot.pngData, tiff: snapshot.tiffData) {
@@ -156,6 +162,7 @@ final class ClipboardService: ObservableObject {
                 contentText: nil,
                 sourceAppName: appName,
                 sourceAppBundleID: bundleID,
+                appIconData: iconData,
                 syncStatus: .pending,
                 fileName: "image-\(Int(Date().timeIntervalSince1970)).png",
                 fileSize: Int64(imageData.count),
@@ -172,6 +179,7 @@ final class ClipboardService: ObservableObject {
             htmlData: snapshot.htmlData
         )
         if var richText = captureRichTextFromSnapshot(snapshot, plainText: plainText, appName: appName, bundleID: bundleID) {
+            richText.appIconData = iconData
             richText.detectedLanguage = CodeLanguageDetector.detectLanguage(in: richText.contentText ?? "")
             if captureRaw { richText.rawPasteboardData = nonEmptyDict(snapshot.allRawData) }
             return [richText]
@@ -183,7 +191,11 @@ final class ClipboardService: ObservableObject {
                 contentText: text,
                 sourceAppName: appName,
                 sourceAppBundleID: bundleID,
-                syncStatus: .pending
+                appIconData: iconData,
+                syncStatus: .pending,
+                rtfData: snapshot.rtfData,
+                htmlData: snapshot.htmlData,
+                rtfdData: snapshot.rtfdData
             )
             if type == .text {
                 item.detectedLanguage = CodeLanguageDetector.detectLanguage(in: text)
@@ -264,9 +276,9 @@ final class ClipboardService: ObservableObject {
                 sourceAppName: appName,
                 sourceAppBundleID: bundleID,
                 syncStatus: .pending,
-                rtfData:  format.type == .rtf  ? data : nil,
-                htmlData: format.type == .html ? data : nil,
-                rtfdData: format.type == .rtfd ? data : nil
+                rtfData:  snapshot.rtfData ?? (format.type == .rtf ? data : nil),
+                htmlData: snapshot.htmlData ?? (format.type == .html ? data : nil),
+                rtfdData: snapshot.rtfdData ?? (format.type == .rtfd ? data : nil)
             )
         }
         return nil

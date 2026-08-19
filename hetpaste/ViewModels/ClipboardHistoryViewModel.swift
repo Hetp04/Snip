@@ -234,6 +234,11 @@ final class ClipboardHistoryViewModel: ObservableObject {
         cloudSyncState = .syncing
         loadError = nil
         do {
+            let accountIdentifier = try await CloudKitManager.shared.currentAccountIdentifier()
+            if LibraryMetadataStore.shared.resetIfAccountChanged(to: accountIdentifier) {
+                CloudKitManager.shared.discardChangeToken()
+                items = []; folders = []; chains = []; chainItems = [:]
+            }
             if LibraryMetadataStore.shared.needsInitialRemoteBootstrap() {
                 // One small, sorted request gets the newest cards on screen
                 // immediately. The following token-based import fills history
@@ -511,6 +516,9 @@ final class ClipboardHistoryViewModel: ObservableObject {
     private func sync(_ item: ClipboardItem) async -> Bool {
         do {
             var uploadItem = item
+            if uploadItem.appIconData == nil, let bundleID = item.sourceAppBundleID, !bundleID.isEmpty {
+                uploadItem.appIconData = IconCache.shared.appIconPNGData(bundleID: bundleID)
+            }
             // A binary card reloads as metadata after a relaunch. Its durable
             // AssetCache source lets an interrupted chunk transfer resume.
             if uploadItem.localData == nil, let cached = AssetCache.shared.data(for: item.id) {

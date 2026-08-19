@@ -242,6 +242,21 @@ final class LibraryMetadataStore: @unchecked Sendable {
         saveStateLocked(true, key: "initial-remote-bootstrap-v1")
     }
 
+    /// A private CloudKit database is scoped to the signed-in Apple Account.
+    /// Never reuse a cache or a server-change token after that identity changes.
+    func resetIfAccountChanged(to accountIdentifier: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let previous = loadStateLocked(key: "cloudkit-account-id-v1", as: String.self)
+        guard previous != accountIdentifier else { return false }
+        _ = execute("BEGIN IMMEDIATE TRANSACTION;")
+        _ = execute("DELETE FROM records;")
+        _ = execute("DELETE FROM state;")
+        saveStateLocked(true, key: "metadata-store-migrated-v1")
+        saveStateLocked(accountIdentifier, key: "cloudkit-account-id-v1")
+        _ = execute("COMMIT;")
+        return true
+    }
+
     /// Applies one CloudKit zone change directly to the local metadata index.
     /// Pending local mutations win until their durable queue is resolved.
     func applyRemoteRecord(_ record: CKRecord) {
