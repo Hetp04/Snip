@@ -185,14 +185,14 @@ extension ClipboardItem {
 }
 
 enum CloudKitVectorCodec {
-    static func encode(_ vector: [Double]) -> Data {
+    nonisolated static func encode(_ vector: [Double]) -> Data {
         vector.reduce(into: Data(capacity: vector.count * MemoryLayout<UInt32>.size)) { data, value in
             var bits = Float(value).bitPattern.littleEndian
             withUnsafeBytes(of: &bits) { data.append(contentsOf: $0) }
         }
     }
 
-    static func decode(_ data: Data) -> [Double]? {
+    nonisolated static func decode(_ data: Data) -> [Double]? {
         guard data.count.isMultiple(of: MemoryLayout<UInt32>.size) else { return nil }
         return data.withUnsafeBytes { bytes in
             bytes.bindMemory(to: UInt32.self).map { Double(Float(bitPattern: UInt32(littleEndian: $0))) }

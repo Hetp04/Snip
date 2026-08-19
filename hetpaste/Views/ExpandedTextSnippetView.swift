@@ -7,10 +7,11 @@ struct ExpandedTextSnippetView: View {
     let item: ClipboardItem
     var onSave: ((UUID, String?, Data?, Data?, Data?) -> Void)?
     
+    @Environment(\.dismiss) private var dismiss
+    
     @State private var isCopied = false
     @State private var isButtonHovered = false
     
-    @State private var command: EditorCommand = .none
     @State private var saveRequested = false
     @State private var isSaving = false
 
@@ -25,11 +26,10 @@ struct ExpandedTextSnippetView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            toolbar
             Divider()
             content
         }
-        .background(Color.white)
+        .background(Color(NSColor.windowBackgroundColor))
         .frame(minWidth: 460, idealWidth: 560, maxWidth: 900,
                minHeight: 320, idealHeight: 450, maxHeight: 800)
     }
@@ -55,6 +55,26 @@ struct ExpandedTextSnippetView: View {
                     .foregroundColor(Theme.accent)
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
+            
+            Button(action: {
+                isSaving = true
+                saveRequested = true
+            }) {
+                HStack(spacing: 4) {
+                    if isSaving {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text("Save")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.accentColor)
+                .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+            .disabled(isSaving)
 
             Button(action: copyToClipboard) {
                 Image(systemName: isCopied ? "checkmark.circle.fill" : "doc.on.doc")
@@ -79,86 +99,18 @@ struct ExpandedTextSnippetView: View {
         .background(Color(NSColor.windowBackgroundColor))
     }
 
-    // MARK: - Toolbar
-    private var toolbar: some View {
-        HStack(spacing: 4) {
-            Group {
-                toolbarButton(icon: "bold", action: { command = .bold })
-                toolbarButton(icon: "italic", action: { command = .italic })
-                toolbarButton(icon: "underline", action: { command = .underline })
-                toolbarButton(icon: "strikethrough", action: { command = .strikethrough })
-                toolbarButton(icon: "textformat.123", action: { command = .monospace })
-            }
-            Divider().frame(height: 16)
-            Group {
-                toolbarButton(icon: "text.alignleft", action: { command = .alignLeft })
-                toolbarButton(icon: "text.aligncenter", action: { command = .alignCenter })
-                toolbarButton(icon: "text.alignright", action: { command = .alignRight })
-            }
-            Divider().frame(height: 16)
-            Group {
-                toolbarButton(icon: "textformat.size.larger", action: { command = .increaseFontSize })
-                toolbarButton(icon: "textformat.size.smaller", action: { command = .decreaseFontSize })
-                
-                ColorPicker("", selection: Binding(get: { Color.black }, set: { newColor in
-                    command = .changeColor(NSColor(newColor))
-                }))
-                .labelsHidden()
-                .frame(width: 24, height: 24)
-            }
-            
-            Spacer()
-            
-            Button(action: {
-                isSaving = true
-                saveRequested = true
-            }) {
-                HStack(spacing: 4) {
-                    if isSaving {
-                        ProgressView().controlSize(.small)
-                    }
-                    Text("Save")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                .foregroundColor(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.accentColor)
-                .cornerRadius(6)
-            }
-            .buttonStyle(.plain)
-            .disabled(isSaving)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(Color(NSColor.controlBackgroundColor))
-    }
-    
-    private func toolbarButton(icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 14))
-                .foregroundColor(.primary)
-                .frame(width: 28, height: 28)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-        }
-    }
-
     // MARK: - Content
     private var content: some View {
-        RichTextEditorView(item: item, command: $command, saveRequested: $saveRequested, onSave: handleSave)
+        RichTextEditorView(item: item, saveRequested: $saveRequested, onSave: handleSave)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(16)
-            .background(Color.white)
+            .background(Color(NSColor.textBackgroundColor))
     }
 
     private func handleSave(rtfData: Data?, rtfdData: Data?, htmlData: Data?, contentText: String?) {
         onSave?(item.id, contentText, rtfData, htmlData, rtfdData)
         isSaving = false
+        dismiss()
     }
 
     // MARK: - Clipboard Action

@@ -51,6 +51,5 @@ struct ClipboardItem: Identifiable, Equatable, Codable {
         case .text, .richText, .url: return nil
         }
     }
-    static func == (lhs: ClipboardItem, rhs: ClipboardItem) -> Bool { lhs.id == rhs.id }
     var revealableFileURL: URL? { FileAccessStore.shared.resolvedURL(for: id, fallback: originalFileURL) }
 }

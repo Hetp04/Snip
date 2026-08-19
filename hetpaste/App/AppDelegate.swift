@@ -98,26 +98,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.updateStatusBarIcon()
-            self?.toggleHUD()
+            Task { @MainActor in
+                self?.updateStatusBarIcon()
+                self?.toggleHUD()
+            }
         }
         NotificationCenter.default.addObserver(
             forName: PsychoCopyManager.queueChangedNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.updateStatusBarIcon()
+            Task { @MainActor in
+                self?.updateStatusBarIcon()
+            }
         }
         NotificationCenter.default.addObserver(
             forName: PsychoCopyManager.secureInputBlockedNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.stripController.showToast("Secure field — press ⌘V manually", isError: false)
+            Task { @MainActor in
+                self?.stripController.showToast("Secure field — press ⌘V manually", isError: false)
+            }
         }
         let searchCombo = viewModel.psychoCopyManager.settings.searchHotkey
         hotkeyManager.registerSearchHotkey(searchCombo) { [weak self] in
-            self?.openMainAppFocusedOnSearch()
+            Task { @MainActor in
+                self?.openMainAppFocusedOnSearch()
+            }
         }
         NotificationCenter.default.addObserver(
             forName: PsychoCopyManager.searchHotkeyChangedNotification,
@@ -126,7 +134,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] notification in
             guard let combo = notification.object as? KeyCombination else { return }
             self?.hotkeyManager.registerSearchHotkey(combo) {
-                self?.openMainAppFocusedOnSearch()
+                Task { @MainActor in
+                    self?.openMainAppFocusedOnSearch()
+                }
             }
         }
         NSApplication.shared.registerForRemoteNotifications()

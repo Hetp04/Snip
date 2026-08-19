@@ -29,8 +29,10 @@ final class WardrobeViewModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self, !self.isLoading else { return }
-            Task { await self.loadItems() }
+            Task { @MainActor in
+                guard let self, !self.isLoading else { return }
+                await self.loadItems()
+            }
         }
         Task {
             await loadItems()

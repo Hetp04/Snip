@@ -639,7 +639,6 @@ struct ClipboardItemRow: View {
                     fontSize: 12,
                     textColor: NSColor(calibratedRed: 55 / 255, green: 53 / 255, blue: 47 / 255, alpha: 1)
                 )
-                    .id(item.updatedAt)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .padding(.horizontal, 10)
@@ -932,7 +931,6 @@ struct ClipboardItemRow: View {
                 if item.contentType == .richText || isCodeContent || item.rtfData != nil || item.rtfdData != nil {
                     VStack(alignment: .leading, spacing: 0) {
                         RichTextCodeView(item: item, lineLimit: isExpanded ? nil : 6)
-                            .id(item.updatedAt)
                             .multilineTextAlignment(.leading)
                     }
                     .padding(10)

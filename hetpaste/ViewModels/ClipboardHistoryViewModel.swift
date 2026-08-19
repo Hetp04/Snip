@@ -92,8 +92,10 @@ final class ClipboardHistoryViewModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            self.service.captureRawTypes = self.psychoCopyManager.isMultiCopyModeActive
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.service.captureRawTypes = self.psychoCopyManager.isMultiCopyModeActive
+            }
         }
         service.onNewItems = { [weak self] items in
             Task { @MainActor in self?.handleNewItems(items) }
@@ -104,11 +106,17 @@ final class ClipboardHistoryViewModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            // CloudKit's explicit Retry-After window is still respected by
-            // loadHistory; this only retries immediately for ordinary loss of
-            // connectivity when the path comes back.
-            Task { @MainActor in self.handleRemoteCloudChange() }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                // CloudKit's explicit Retry-After window is still respected by
+                // loadHistory; this only retries immediately for ordinary loss of
+                // connectivity when the path comes back.
+                if case .failed = self.cloudSyncState {
+                    Task { await self.loadHistory() }
+                } else {
+                    self.handleRemoteCloudChange()
+                }
+            }
         }
         isClipboardCapturePaused = service.isCapturePaused
         clipboardCaptureStateCancellable = service.$isCapturePaused
@@ -485,13 +493,14 @@ final class ClipboardHistoryViewModel: ObservableObject {
                     print("[OCR] Vision poor but OpenAI not configured — no fallback")
                 }
             }
-
+            
+            let finalOCRText = finalText
             await MainActor.run {
                 self.updateItem(id: itemID) {
-                    if finalText.trimmingCharacters(in: .whitespaces).isEmpty {
+                    if finalOCRText.trimmingCharacters(in: .whitespaces).isEmpty {
                         $0.ocrStatus = .none
                     } else {
-                        $0.ocrText   = finalText
+                        $0.ocrText = finalOCRText
                         $0.ocrStatus = .done
                     }
                 }
@@ -546,7 +555,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
             let rawVector = try await EmbeddingService.shared.embedWithRetry(item.rawSearchableText)
             try await repository.updateEmbeddings(id: item.id, rawVector: rawVector, memoryVector: nil, status: "pending")
             updateItem(id: item.id) { $0.rawEmbedding = rawVector }
-            let sourceHash = await CardUnderstandingService.shared.sourceHash(for: item)
+            let sourceHash = CardUnderstandingService.shared.sourceHash(for: item)
             let context: String
             if let cached = try await repository.cachedSearchContext(sourceHash: sourceHash) {
                 context = cached
@@ -612,7 +621,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
         searchTask = Task { [weak self] in
             do {
                 let literalResults = await Task.detached(priority: .userInitiated) {
-                    LibraryMetadataStore.shared.searchItems(matching: trimmed)
+                    return LibraryMetadataStore.shared.searchItems(matching: trimmed)
                 }.value
                 guard !Task.isCancelled, self?.activeSearchID == searchID else { return }
                 self?.semanticSearchResults = literalResults
@@ -1357,8 +1366,6 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 }
                 return provider
             }
-        case .video:
-            break
         }
         return NSItemProvider(object: (item.contentText ?? item.fileName ?? "") as NSString)
     }
@@ -1538,9 +1545,9 @@ final class ClipboardHistoryViewModel: ObservableObject {
             $0.updatedAt = Date()
         }
         
-        runDurableItemMutation(itemID: id) { [repository] in
-            try await repository.updateContent(id: id, contentText: contentText, rtfData: rtfData, htmlData: htmlData, rtfdData: rtfdData)
-        }
+        guard let item = items.first(where: { $0.id == id }) else { return }
+        queueItemForRetry(id)
+        _ = await sync(item)
     }
 
     private func runDurableItemMutation(itemID: UUID, operation: @escaping () async throws -> Void) {

@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		3392DA1C2FD1088600F66EDF /* Config.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 3392DA1B2FD1088600F66EDF /* Config.xcconfig */; };
+		33AAF7AF303553B6008A9841 /* RichTextKit in Frameworks */ = {isa = PBXBuildFile; productRef = 33AAF7AE303553B6008A9841 /* RichTextKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -64,6 +65,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				33AAF7AF303553B6008A9841 /* RichTextKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -140,6 +142,7 @@
 			);
 			name = hetpaste;
 			packageProductDependencies = (
+				33AAF7AE303553B6008A9841 /* RichTextKit */,
 			);
 			productName = hetpaste;
 			productReference = 33AECC002FD0CA50007AA64D /* hetpaste.app */;
@@ -179,6 +182,7 @@
 			mainGroup = 33AECBF72FD0CA50007AA64D;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				33AAF7AD303553B6008A9841 /* XCRemoteSwiftPackageReference "RichTextKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 33AECC012FD0CA50007AA64D /* Products */;
@@ -504,6 +508,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		33AAF7AD303553B6008A9841 /* XCRemoteSwiftPackageReference "RichTextKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/danielsaidi/RichTextKit.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.2.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		33AAF7AE303553B6008A9841 /* RichTextKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 33AAF7AD303553B6008A9841 /* XCRemoteSwiftPackageReference "RichTextKit" */;
+			productName = RichTextKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 33AECBF82FD0CA50007AA64D /* Project object */;
 }

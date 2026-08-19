@@ -1,6 +1,6 @@
 import Foundation
 enum Formatters {
-    static func fileSize(_ bytes: Int64?) -> String {
+    nonisolated static func fileSize(_ bytes: Int64?) -> String {
         guard let bytes else { return "" }
         let kb = Double(bytes) / 1024.0
         if kb < 1024 { return String(format: "%.0f KB", kb) }

@@ -1,190 +1,197 @@
 import SwiftUI
 import AppKit
+import RichTextKit
 
-enum EditorCommand: Equatable {
-    case none
-    case bold
-    case italic
-    case underline
-    case strikethrough
-    case monospace
-    case alignLeft
-    case alignCenter
-    case alignRight
-    case increaseFontSize
-    case decreaseFontSize
-    case changeColor(NSColor)
-}
-
-struct RichTextEditorView: NSViewRepresentable {
+struct RichTextEditorView: View {
     let item: ClipboardItem
-    @Binding var command: EditorCommand
     @Binding var saveRequested: Bool
     let onSave: (Data?, Data?, Data?, String?) -> Void
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
+    @StateObject var context = RichTextContext()
+    @State private var text: NSAttributedString
+    
+    init(item: ClipboardItem, saveRequested: Binding<Bool>, onSave: @escaping (Data?, Data?, Data?, String?) -> Void) {
+        self.item = item
+        self._saveRequested = saveRequested
+        self.onSave = onSave
+        
+        var initialText = NSAttributedString()
+        if let rtfd = item.rtfdData, let parsed = try? NSAttributedString(data: rtfd, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
+            initialText = parsed
+        } else if let rtf = item.rtfData, let parsed = try? NSAttributedString(data: rtf, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) {
+            initialText = parsed
+        } else if let html = item.htmlData, let parsed = try? NSAttributedString(data: html, options: [.documentType: NSAttributedString.DocumentType.html], documentAttributes: nil) {
+            initialText = parsed
+        } else if let contentText = item.contentText {
+            initialText = NSAttributedString(string: contentText, attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.textColor])
+        }
+        self._text = State(initialValue: initialText)
     }
 
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSTextView.scrollableTextView()
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
-        scrollView.autoresizingMask = [.width, .height]
-        
-        let textView = scrollView.documentView as! NSTextView
-        textView.delegate = context.coordinator
-        textView.isRichText = true
-        textView.allowsUndo = true
-        textView.isEditable = true
-        textView.isSelectable = true
-        textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
-        textView.drawsBackground = false
-        
-        context.coordinator.textView = textView
-        
-        var nsAttr: NSAttributedString? = nil
-        if let rtfd = item.rtfdData {
-            nsAttr = try? NSAttributedString(data: rtfd, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil)
-        } else if let rtf = item.rtfData {
-            nsAttr = try? NSAttributedString(data: rtf, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil)
-        } else if let html = item.htmlData {
-            nsAttr = try? NSAttributedString(data: html, options: [.documentType: NSAttributedString.DocumentType.html], documentAttributes: nil)
-        } else if let language = item.detectedLanguage {
-            nsAttr = CodeSyntaxHighlighter.highlightedText(
-                item.contentText ?? "",
-                language: language,
-                fontSize: 13,
-                fallbackColor: NSColor.textColor
-            )
-        } else if let text = item.contentText {
-            nsAttr = NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.textColor])
-        }
-        
-        if let attr = nsAttr {
-            textView.textStorage?.setAttributedString(attr)
-        }
-        
-        return scrollView
-    }
+    var body: some View {
+        VStack(spacing: 0) {
+            modernToolbar
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    Rectangle()
+                        .fill(Material.ultraThin)
+                        .shadow(color: Color.black.opacity(0.05), radius: 3, y: 2)
+                )
+                .zIndex(1)
+            
+            Divider()
 
-    func updateNSView(_ nsView: NSScrollView, context: Context) {
-        context.coordinator.parent = self
-        guard let textView = nsView.documentView as? NSTextView else { return }
-        
-        if command != .none {
-            context.coordinator.applyCommand(command, to: textView)
-            DispatchQueue.main.async {
-                self.command = .none
+            RichTextEditor(text: $text, context: context) { textView in
+                if let nsTextView = textView as? NSTextView {
+                    nsTextView.isRichText = true
+                    nsTextView.allowsUndo = true
+                    nsTextView.drawsBackground = false
+                    nsTextView.isSelectable = true
+                    nsTextView.isEditable = true
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding()
+            .background(Color(NSColor.textBackgroundColor))
         }
-        
-        if saveRequested {
-            DispatchQueue.main.async {
-                context.coordinator.performSave(textView: textView)
-                self.saveRequested = false
+        .onChange(of: saveRequested) { requested in
+            if requested {
+                performSave()
             }
         }
     }
 
-    class Coordinator: NSObject, NSTextViewDelegate {
-        var parent: RichTextEditorView
-        weak var textView: NSTextView?
+
+    // MARK: - Modern Toolbar
+    
+    private var modernToolbar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                fontSizeControl
+                Divider().frame(height: 20)
+                fontStyleControl
+                Divider().frame(height: 20)
+                alignmentControl
+                Divider().frame(height: 20)
+                colorControl
+            }
+            .padding(.horizontal, 4)
+        }
+    }
+    
+    private var fontSizeControl: some View {
+        HStack(spacing: 4) {
+            toolbarActionButton(icon: "minus") { if context.fontSize > 8 { context.fontSize -= 1 } }
+            
+            Text("\(Int(context.fontSize))")
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .frame(width: 26)
+                .multilineTextAlignment(.center)
+            
+            toolbarActionButton(icon: "plus") { if context.fontSize < 144 { context.fontSize += 1 } }
+        }
+        .padding(4)
+        .background(Color.secondary.opacity(0.1))
+        .cornerRadius(8)
+    }
+    
+    private var fontStyleControl: some View {
+        HStack(spacing: 4) {
+            toolbarToggleButton(icon: "bold", isActive: context.hasStyle(.bold)) { context.toggleStyle(.bold) }
+            toolbarToggleButton(icon: "italic", isActive: context.hasStyle(.italic)) { context.toggleStyle(.italic) }
+            toolbarToggleButton(icon: "underline", isActive: context.hasStyle(.underlined)) { context.toggleStyle(.underlined) }
+            toolbarToggleButton(icon: "strikethrough", isActive: context.hasStyle(.strikethrough)) { context.toggleStyle(.strikethrough) }
+        }
+        .padding(4)
+        .background(Color.secondary.opacity(0.1))
+        .cornerRadius(8)
+    }
+    
+    private var alignmentControl: some View {
+        HStack(spacing: 4) {
+            toolbarToggleButton(icon: "text.alignleft", isActive: context.textAlignment == .left) { context.textAlignment = .left }
+            toolbarToggleButton(icon: "text.aligncenter", isActive: context.textAlignment == .center) { context.textAlignment = .center }
+            toolbarToggleButton(icon: "text.alignright", isActive: context.textAlignment == .right) { context.textAlignment = .right }
+            toolbarToggleButton(icon: "text.justify", isActive: context.textAlignment == .justified) { context.textAlignment = .justified }
+        }
+        .padding(4)
+        .background(Color.secondary.opacity(0.1))
+        .cornerRadius(8)
+    }
+    
+    private var colorControl: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: "character")
+                    .font(.system(size: 13, weight: .semibold))
+                ColorPicker("", selection: Binding(
+                    get: { Color(context.colors[.foreground] ?? NSColor.textColor) },
+                    set: { context.setColor(.foreground, to: NSColor($0)) }
+                ))
+                .labelsHidden()
+            }
+            
+            HStack(spacing: 6) {
+                Image(systemName: "paintbrush.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                ColorPicker("", selection: Binding(
+                    get: { Color(context.colors[.background] ?? NSColor.clear) },
+                    set: { context.setColor(.background, to: NSColor($0)) }
+                ))
+                .labelsHidden()
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color.secondary.opacity(0.1))
+        .cornerRadius(8)
+    }
+
+    private func toolbarToggleButton(icon: String, isActive: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(isActive ? .white : .primary)
+                .frame(width: 26, height: 26)
+                .background(isActive ? Color.accentColor : Color.clear)
+                .cornerRadius(6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+    }
+    
+    private func toolbarActionButton(icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(.primary)
+                .frame(width: 26, height: 26)
+                .background(Color.clear)
+                .cornerRadius(6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+    }
+
+    private func performSave() {
+        let fullRange = NSRange(location: 0, length: text.length)
         
-        init(_ parent: RichTextEditorView) {
-            self.parent = parent
+        var rtfdData: Data? = nil
+        if text.containsAttachments(in: fullRange) {
+            rtfdData = text.rtfd(from: fullRange, documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd])
         }
-
-        func performSave(textView: NSTextView) {
-            let attrString = textView.attributedString()
-            let fullRange = NSRange(location: 0, length: attrString.length)
-            
-            let rtfData = try? attrString.data(from: fullRange, documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
-            
-            var rtfdData: Data? = nil
-            if attrString.containsAttachments(in: fullRange) {
-                rtfdData = try? attrString.rtfd(from: fullRange, documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd])
-            }
-            
-            let htmlData = try? attrString.data(from: fullRange, documentAttributes: [.documentType: NSAttributedString.DocumentType.html])
-            let contentText = attrString.string
-            
-            parent.onSave(rtfData, rtfdData, htmlData, contentText)
-        }
-
-        func applyCommand(_ cmd: EditorCommand, to textView: NSTextView) {
-            let range = textView.selectedRange()
-            guard range.location != NSNotFound else { return }
-            guard let textStorage = textView.textStorage else { return }
-            
-            switch cmd {
-            case .bold:
-                textStorage.enumerateAttribute(.font, in: range, options: []) { font, attrRange, _ in
-                    if let oldFont = font as? NSFont {
-                        let isBold = oldFont.fontDescriptor.symbolicTraits.contains(.bold)
-                        let newFont = isBold ? NSFontManager.shared.convert(oldFont, toNotHaveTrait: .boldFontMask) : NSFontManager.shared.convert(oldFont, toHaveTrait: .boldFontMask)
-                        textStorage.addAttribute(.font, value: newFont, range: attrRange)
-                    }
-                }
-            case .italic:
-                textStorage.enumerateAttribute(.font, in: range, options: []) { font, attrRange, _ in
-                    if let oldFont = font as? NSFont {
-                        let isItalic = oldFont.fontDescriptor.symbolicTraits.contains(.italic)
-                        let newFont = isItalic ? NSFontManager.shared.convert(oldFont, toNotHaveTrait: .italicFontMask) : NSFontManager.shared.convert(oldFont, toHaveTrait: .italicFontMask)
-                        textStorage.addAttribute(.font, value: newFont, range: attrRange)
-                    }
-                }
-            case .underline:
-                textStorage.enumerateAttribute(.underlineStyle, in: range, options: []) { style, attrRange, _ in
-                    let isUnderlined = (style as? Int) == NSUnderlineStyle.single.rawValue
-                    if isUnderlined {
-                        textStorage.removeAttribute(.underlineStyle, range: attrRange)
-                    } else {
-                        textStorage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: attrRange)
-                    }
-                }
-            case .strikethrough:
-                textStorage.enumerateAttribute(.strikethroughStyle, in: range, options: []) { style, attrRange, _ in
-                    let isStrikethrough = (style as? Int) == NSUnderlineStyle.single.rawValue
-                    if isStrikethrough {
-                        textStorage.removeAttribute(.strikethroughStyle, range: attrRange)
-                    } else {
-                        textStorage.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: attrRange)
-                    }
-                }
-            case .monospace:
-                textStorage.enumerateAttribute(.font, in: range, options: []) { font, attrRange, _ in
-                    if let oldFont = font as? NSFont {
-                        let newFont = NSFont.monospacedSystemFont(ofSize: oldFont.pointSize, weight: .regular)
-                        textStorage.addAttribute(.font, value: newFont, range: attrRange)
-                    }
-                }
-            case .alignLeft:
-                textView.setAlignment(.left, range: range)
-            case .alignCenter:
-                textView.setAlignment(.center, range: range)
-            case .alignRight:
-                textView.setAlignment(.right, range: range)
-            case .increaseFontSize:
-                textStorage.enumerateAttribute(.font, in: range, options: []) { font, attrRange, _ in
-                    if let oldFont = font as? NSFont {
-                        let newFont = NSFontManager.shared.convert(oldFont, toSize: oldFont.pointSize + 1)
-                        textStorage.addAttribute(.font, value: newFont, range: attrRange)
-                    }
-                }
-            case .decreaseFontSize:
-                textStorage.enumerateAttribute(.font, in: range, options: []) { font, attrRange, _ in
-                    if let oldFont = font as? NSFont {
-                        let newFont = NSFontManager.shared.convert(oldFont, toSize: max(8, oldFont.pointSize - 1))
-                        textStorage.addAttribute(.font, value: newFont, range: attrRange)
-                    }
-                }
-            case .changeColor(let color):
-                textStorage.addAttribute(.foregroundColor, value: color, range: range)
-            case .none:
-                break
-            }
-        }
+        
+        let rtfData = try? text.data(from: fullRange, documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
+        let htmlData = try? text.data(from: fullRange, documentAttributes: [.documentType: NSAttributedString.DocumentType.html])
+        let contentText = text.string
+        
+        onSave(rtfData, rtfdData, htmlData, contentText)
     }
 }
