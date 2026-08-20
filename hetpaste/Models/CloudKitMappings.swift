@@ -9,6 +9,29 @@ enum CloudRecordType {
     static let chainItem = "ClipboardChainItem"
     static let wardrobeItem = "WardrobeItem"
     static let clipboardAssetChunk = "ClipboardAssetChunk"
+    static let folderMembershipOperation = "FolderMembershipOperation"
+}
+
+/// Append-only membership intent. This is the migration path away from
+/// overwriting a card's folder set during concurrent edits on different devices.
+struct FolderMembershipOperation: Codable, Identifiable {
+    enum Kind: String, Codable { case add, remove }
+    let id: UUID
+    let itemID: UUID
+    let folderID: UUID
+    let kind: Kind
+    let createdAt: Date
+
+    func cloudRecord() -> CKRecord {
+        let record = CKRecord(recordType: CloudRecordType.folderMembershipOperation,
+                              recordID: CloudKitManager.shared.recordID(type: CloudRecordType.folderMembershipOperation, id: id))
+        record["uuid"] = id.uuidString
+        record["itemID"] = itemID.uuidString
+        record["folderID"] = folderID.uuidString
+        record["kind"] = kind.rawValue
+        record["createdAt"] = createdAt
+        return record
+    }
 }
 
 extension CKRecord {
@@ -31,17 +54,60 @@ extension CKRecord {
 /// encoded into the record's existing `asset` field instead, keeping the
 /// record metadata queryable and the full content available on other devices.
 struct CloudClipboardPayload: Codable {
-    static let storagePrefix = "cloud-payload-v1:"
+    static let storagePrefix = "cloud-payload-v2:"
+    let version: Int
+    let checksum: String
     let contentText: String?
+    let previewText: String?
     let rtfData: Data?
     let htmlData: Data?
     let rtfdData: Data?
+    let attachmentChecksum: String?
 
     init(item: ClipboardItem) {
+        version = 3
         contentText = item.contentText
+        previewText = item.previewText
         rtfData = item.rtfData
         htmlData = item.htmlData
         rtfdData = item.rtfdData
+        attachmentChecksum = rtfdData.map(Self.sha256)
+        checksum = Self.checksum(contentText: contentText, rtfData: rtfData, htmlData: htmlData, rtfdData: rtfdData)
+    }
+
+    private enum CodingKeys: String, CodingKey { case version, checksum, contentText, previewText, rtfData, htmlData, rtfdData, attachmentChecksum }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        version = try values.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        contentText = try values.decodeIfPresent(String.self, forKey: .contentText)
+        previewText = try values.decodeIfPresent(String.self, forKey: .previewText)
+        rtfData = try values.decodeIfPresent(Data.self, forKey: .rtfData)
+        htmlData = try values.decodeIfPresent(Data.self, forKey: .htmlData)
+        rtfdData = try values.decodeIfPresent(Data.self, forKey: .rtfdData)
+        attachmentChecksum = try values.decodeIfPresent(String.self, forKey: .attachmentChecksum)
+        checksum = try values.decodeIfPresent(String.self, forKey: .checksum)
+            ?? Self.checksum(contentText: contentText, rtfData: rtfData, htmlData: htmlData, rtfdData: rtfdData)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(version, forKey: .version); try values.encode(checksum, forKey: .checksum)
+        try values.encodeIfPresent(contentText, forKey: .contentText); try values.encodeIfPresent(previewText, forKey: .previewText)
+        try values.encodeIfPresent(rtfData, forKey: .rtfData); try values.encodeIfPresent(htmlData, forKey: .htmlData); try values.encodeIfPresent(rtfdData, forKey: .rtfdData)
+        try values.encodeIfPresent(attachmentChecksum, forKey: .attachmentChecksum)
+    }
+
+    static func checksum(contentText: String?, rtfData: Data?, htmlData: Data?, rtfdData: Data?) -> String {
+        // Length-prefix every part. The former raw concatenation made
+        // different component boundaries ambiguous ("ab" + "c" vs "a" + "bc").
+        var data = Data("sniphet-rich-payload-v3".utf8)
+        for component in [contentText.map { Data($0.utf8) }, rtfData, htmlData, rtfdData] {
+            var length = UInt64(component?.count ?? 0).bigEndian
+            data.append(Data(bytes: &length, count: MemoryLayout<UInt64>.size))
+            if let component { data.append(component) }
+        }
+        return sha256(data)
     }
 
     static func encodedIfRequired(for item: ClipboardItem) throws -> Data? {
@@ -56,15 +122,29 @@ struct CloudClipboardPayload: Codable {
         return try JSONEncoder().encode(CloudClipboardPayload(item: item))
     }
 
-    static func decode(from record: CKRecord) -> CloudClipboardPayload? {
-        guard record.string("storagePath")?.hasPrefix(storagePrefix) == true,
-              let url = (record["asset"] as? CKAsset)?.fileURL,
-              let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(CloudClipboardPayload.self, from: data)
+    static func checksum(for item: ClipboardItem) -> String {
+        checksum(contentText: item.contentText, rtfData: item.rtfData, htmlData: item.htmlData, rtfdData: item.rtfdData)
     }
 
     static func decode(from data: Data) -> CloudClipboardPayload? {
-        try? JSONDecoder().decode(CloudClipboardPayload.self, from: data)
+        guard let payload = try? JSONDecoder().decode(CloudClipboardPayload.self, from: data),
+              (payload.version < 3 || payload.attachmentChecksum == payload.rtfdData.map(sha256)),
+              payload.checksum == (payload.version < 3
+                ? legacyChecksum(contentText: payload.contentText, rtfData: payload.rtfData, htmlData: payload.htmlData, rtfdData: payload.rtfdData)
+                : checksum(contentText: payload.contentText, rtfData: payload.rtfData, htmlData: payload.htmlData, rtfdData: payload.rtfdData))
+        else { return nil }
+        return payload
+    }
+
+    private static func legacyChecksum(contentText: String?, rtfData: Data?, htmlData: Data?, rtfdData: Data?) -> String {
+        var data = Data()
+        if let contentText { data.append(contentsOf: contentText.utf8) }
+        for representation in [rtfData, htmlData, rtfdData] { if let representation { data.append(representation) } }
+        return sha256(data)
+    }
+
+    nonisolated static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -95,6 +175,10 @@ struct CloudChunkManifest: Codable, Equatable {
         self.count = max(1, Int(ceil(Double(data.count) / Double(chunkSize))))
         self.byteCount = Int64(data.count)
         self.checksum = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    init(kind: Kind, count: Int, byteCount: Int64, checksum: String) {
+        self.kind = kind; self.count = count; self.byteCount = byteCount; self.checksum = checksum
     }
 
     var storagePath: String { "\(Self.storagePrefix):\(kind.rawValue):\(count):\(byteCount):\(checksum)" }
@@ -144,6 +228,8 @@ extension ClipboardItem {
         record["rtfData"] = rtfData
         record["htmlData"] = htmlData
         record["rtfdData"] = rtfdData
+        record["richPayloadChecksum"] = hasPortableRichText ? CloudClipboardPayload.checksum(for: self) : nil
+        record["richPayloadVersion"] = hasPortableRichText ? NSNumber(value: 3) : nil
         record["detectedLanguage"] = detectedLanguage
         record["isDeleted"] = isDeleted as NSNumber
         record["deletedAt"] = deletedAt
@@ -166,8 +252,7 @@ extension ClipboardItem {
               let source = record.string("sourceAppName") else {
             throw CloudKitPersistenceError.invalidRecord(CloudRecordType.clipboardItem)
         }
-        let payload = CloudClipboardPayload.decode(from: record)
-        id = uuid; contentType = type; contentText = payload?.contentText ?? record.string("contentText")
+        id = uuid; contentType = type; contentText = record.string("contentText")
         sourceAppName = source; sourceAppBundleID = record.string("sourceBundleID")
         appIconData = record.data("appIconData")
         folderIDs = record.uuids("folderIDs"); isPinned = record.bool("isPinned")
@@ -176,12 +261,21 @@ extension ClipboardItem {
         syncStatus = SyncStatus(rawValue: record.string("syncStatus") ?? "synced") ?? .synced
         storagePath = record.string("storagePath"); fileName = record.string("fileName")
         fileSize = record.int64("fileSize"); mimeType = record.string("mimeType")
-        rtfData = payload?.rtfData ?? record.data("rtfData"); htmlData = payload?.htmlData ?? record.data("htmlData"); rtfdData = payload?.rtfdData ?? record.data("rtfdData")
+        rtfData = record.data("rtfData"); htmlData = record.data("htmlData"); rtfdData = record.data("rtfdData")
+        richPayloadChecksum = record.string("richPayloadChecksum")
+        richPayloadVersion = record.int("richPayloadVersion")
         detectedLanguage = record.string("detectedLanguage"); isDeleted = record.bool("isDeleted")
         deletedAt = record.date("deletedAt"); searchContext = record.string("searchContext")
         contextSourceHash = record.string("contextSourceHash"); rawEmbedding = record.doubles("rawEmbedding")
         embedding = record.doubles("embedding"); embeddingStatus = record.string("embeddingStatus") ?? "pending"
         localData = nil
+        // Legacy records did not carry integrity metadata. New records must
+        // match before their inline rich representations are trusted.
+        if let richPayloadChecksum, rtfData != nil || htmlData != nil || rtfdData != nil,
+           richPayloadChecksum != CloudClipboardPayload.checksum(for: self) {
+            rtfData = nil; htmlData = nil; rtfdData = nil
+            contentType = .text
+        }
         if let thumbnail = record.data("thumbnailData") { ThumbnailCache.shared.store(thumbnail, for: id) }
     }
 }

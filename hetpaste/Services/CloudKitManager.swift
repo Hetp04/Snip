@@ -6,6 +6,37 @@ struct CloudBatchDeletionFailure: Error {
     let underlyingError: Error
 }
 
+struct CloudSyncDelta: Sendable {
+    var insertedOrUpdated = 0
+    var deleted = 0
+    var ignoredAssetChunks = 0
+    var elapsed: TimeInterval = 0
+    var fetchElapsed: TimeInterval = 0
+    var applyElapsed: TimeInterval = 0
+    var hasChanges: Bool { insertedOrUpdated > 0 || deleted > 0 }
+}
+
+/// One per-process owner for CloudKit zone-token reads. CloudKit pushes are
+/// hints and often arrive in bursts; callers join the active task rather than
+/// issuing duplicate change-token requests that race to advance the token.
+actor LibrarySyncCoordinator {
+    static let shared = LibrarySyncCoordinator()
+    private var activeSync: Task<CloudSyncDelta, Error>?
+
+    func sync() async throws -> CloudSyncDelta {
+        if let activeSync { return try await activeSync.value }
+        let task = Task<CloudSyncDelta, Error> {
+            try await CloudKitManager.shared.consumeRemoteChanges(
+                onRecordsChanged: { LibraryMetadataStore.shared.applyRemoteRecords($0) },
+                onRecordsDeleted: { LibraryMetadataStore.shared.applyRemoteDeletions($0) }
+            )
+        }
+        activeSync = task
+        defer { activeSync = nil }
+        return try await task.value
+    }
+}
+
 private enum CloudBatchDeletionInternalError: Error {
     case missingResult
 }
@@ -98,7 +129,21 @@ final class CloudKitManager {
         for start in stride(from: 0, to: records.count, by: 200) {
             let batch = Array(records[start..<min(start + 200, records.count)])
             let result = try await database.modifyRecords(saving: batch, deleting: [], savePolicy: .ifServerRecordUnchanged, atomically: false)
-            for record in batch { _ = try result.saveResults[record.recordID]?.get() }
+            var firstError: Error?
+            for record in batch {
+                switch result.saveResults[record.recordID] {
+                case .success?: break
+                case .failure?:
+                    // Reuse the single-record conflict path. This preserves
+                    // changed fields and avoids silently losing the rest of a
+                    // successful batch when one record raced another device.
+                    do { _ = try await save(record) }
+                    catch { if firstError == nil { firstError = error } }
+                case nil:
+                    if firstError == nil { firstError = CloudBatchDeletionInternalError.missingResult }
+                }
+            }
+            if let firstError { throw firstError }
         }
     }
 
@@ -269,26 +314,37 @@ final class CloudKitManager {
         onRecordsChanged: @escaping ([CKRecord]) -> Void = { _ in },
         onRecordsDeleted: @escaping ([CKRecord.ID]) -> Void = { _ in },
         onPageApplied: @escaping () -> Void = {}
-    ) async throws -> Bool {
+    ) async throws -> CloudSyncDelta {
+        let startedAt = Date()
         try await verifyAccount()
         let key = "cloudkit.library-zone-change-token"
         let savedToken = UserDefaults.standard.data(forKey: key).flatMap {
             try? NSKeyedUnarchiver.unarchivedObject(ofClass: CKServerChangeToken.self, from: $0)
         }
         var token = savedToken
-        var changed = false
+        var delta = CloudSyncDelta()
         while true {
             do {
+                let fetchStartedAt = Date()
                 let fetchedPage = try await database.recordZoneChanges(inZoneWith: libraryZoneID, since: token)
+                delta.fetchElapsed += Date().timeIntervalSince(fetchStartedAt)
                 var modifications: [CKRecord] = []
                 for (_, result) in fetchedPage.modificationResultsByID {
                     let record = try result.get().record
                     if record.recordType != CloudRecordType.clipboardAssetChunk { modifications.append(record) }
+                    else { delta.ignoredAssetChunks += 1 }
                 }
-                let deletions = fetchedPage.deletions.map(\.recordID).filter { !$0.recordName.hasPrefix("ClipboardAssetChunk.") }
+                var deletions: [CKRecord.ID] = []
+                for deletion in fetchedPage.deletions {
+                    if deletion.recordID.recordName.hasPrefix("ClipboardAssetChunk.") { delta.ignoredAssetChunks += 1 }
+                    else { deletions.append(deletion.recordID) }
+                }
+                let applyStartedAt = Date()
                 if !modifications.isEmpty { onRecordsChanged(modifications) }
                 if !deletions.isEmpty { onRecordsDeleted(deletions) }
-                changed = changed || !modifications.isEmpty || !deletions.isEmpty
+                delta.applyElapsed += Date().timeIntervalSince(applyStartedAt)
+                delta.insertedOrUpdated += modifications.count
+                delta.deleted += deletions.count
                 if !modifications.isEmpty || !deletions.isEmpty { onPageApplied() }
                 token = fetchedPage.changeToken
                 if !fetchedPage.moreComing { break }
@@ -301,7 +357,8 @@ final class CloudKitManager {
         if let token, let data = try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true) {
             UserDefaults.standard.set(data, forKey: key)
         }
-        return changed
+        delta.elapsed = Date().timeIntervalSince(startedAt)
+        return delta
     }
 
     func asset(from data: Data, id: UUID) throws -> (CKAsset, URL) {
@@ -324,11 +381,9 @@ final class CloudKitManager {
         var temporaryAssetURLs: [URL] = []
         do {
             for key in source.allKeys() where keys?.contains(key) ?? true {
-                if key == "folderIDs", let local = source[key] as? [String] {
-                    let serverValues = destination[key] as? [String] ?? []
-                    destination[key] = Array(Set(serverValues).union(local)).sorted()
-                    continue
-                }
+                // Folder membership is synchronized through append-only
+                // operation records. Do not union this compatibility snapshot:
+                // a union turns a concurrent removal into an accidental add.
                 guard let asset = source[key] as? CKAsset else {
                     destination[key] = source[key]
                     continue
@@ -386,11 +441,9 @@ final class CloudKitManager {
         let info = CKSubscription.NotificationInfo()
         info.shouldSendContentAvailable = true
         subscription.notificationInfo = info
-        do {
-            _ = try await database.subscription(for: id)
-        } catch let error as CKError where error.code == .unknownItem {
-            _ = try await database.modifySubscriptions(saving: [subscription], deleting: [])
-        }
+        // Saving by a stable identifier is both a health check and a repair:
+        // it replaces stale notification settings from an older release.
+        _ = try await database.modifySubscriptions(saving: [subscription], deleting: [])
     }
 }
 

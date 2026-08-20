@@ -13,6 +13,13 @@ final class CloudSyncDiagnostics: ObservableObject {
     @Published private(set) var lastSyncSource = "—"
     @Published private(set) var lastPushReceivedAt: Date?
     @Published private(set) var lastImportedChangeCount = 0
+    @Published private(set) var lastDeletedChangeCount = 0
+    @Published private(set) var lastIgnoredChunkCount = 0
+    @Published private(set) var lastSyncDuration: TimeInterval = 0
+    @Published private(set) var lastCloudFetchDuration: TimeInterval = 0
+    @Published private(set) var lastLocalApplyDuration: TimeInterval = 0
+    @Published private(set) var lastUIApplyDuration: TimeInterval = 0
+    @Published private(set) var lastRichPayloadHydrationDuration: TimeInterval = 0
     @Published private(set) var nextRetryAt: Date?
     @Published private(set) var queuedOperationCount = 0
     @Published private(set) var transferCompletedBytes: Int64 = 0
@@ -32,8 +39,20 @@ final class CloudSyncDiagnostics: ObservableObject {
         wardrobeQueueCount = count
         queuedOperationCount = libraryQueueCount + wardrobeQueueCount
     }
-    func recordSuccess(source: String = "foreground", importedChanges: Int = 0) { lastSuccessfulSync = Date(); lastError = nil; nextRetryAt = nil; lastSyncSource = source; lastImportedChangeCount = importedChanges }
+    func recordSuccess(source: String = "foreground", importedChanges: Int = 0) {
+        lastSuccessfulSync = Date(); lastError = nil; nextRetryAt = nil; lastSyncSource = source
+        lastImportedChangeCount = importedChanges; lastDeletedChangeCount = 0; lastIgnoredChunkCount = 0; lastSyncDuration = 0
+        lastCloudFetchDuration = 0; lastLocalApplyDuration = 0
+    }
+    func recordSuccess(source: String, delta: CloudSyncDelta) {
+        lastSuccessfulSync = Date(); lastError = nil; nextRetryAt = nil; lastSyncSource = source
+        lastImportedChangeCount = delta.insertedOrUpdated; lastDeletedChangeCount = delta.deleted
+        lastIgnoredChunkCount = delta.ignoredAssetChunks; lastSyncDuration = delta.elapsed
+        lastCloudFetchDuration = delta.fetchElapsed; lastLocalApplyDuration = delta.applyElapsed
+    }
     func recordPushReceived() { lastPushReceivedAt = Date() }
+    func recordUIApply(duration: TimeInterval) { lastUIApplyDuration = duration }
+    func recordRichPayloadHydration(duration: TimeInterval) { lastRichPayloadHydrationDuration = duration }
 
     func beginLargeTransfer(totalBytes: Int64, completedBytes: Int64 = 0) {
         transferTotalBytes = totalBytes
@@ -59,4 +78,6 @@ final class CloudSyncDiagnostics: ObservableObject {
             nextRetryAt = Date().addingTimeInterval(seconds.doubleValue)
         }
     }
+
+    func recordBackgroundSchedulingFailure(_ error: Error) { lastError = "Background refresh: \(error.localizedDescription)" }
 }

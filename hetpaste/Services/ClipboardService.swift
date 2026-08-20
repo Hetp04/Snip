@@ -99,9 +99,12 @@ final class ClipboardService: ObservableObject {
         let shouldCaptureRaw = captureRawTypes
         let sourceApp = detectedSourceApp()
         let generation = captureGeneration
+        // NSPasteboard is mutable global state. Capture it on the poller's
+        // thread before doing any expensive decoding, otherwise a fast second
+        // copy can be recorded as the first change.
+        let snapshot = PasteboardSnapshot(from: pasteboard)
         captureQueue.async { [weak self] in
             guard let self else { return }
-            let snapshot = PasteboardSnapshot(from: NSPasteboard.general)
             let items = self.captureFromSnapshot(snapshot, sourceApp: sourceApp, captureRaw: shouldCaptureRaw)
             DispatchQueue.main.async {
                 guard !self.isCapturePaused, self.captureGeneration == generation else { return }
@@ -146,12 +149,18 @@ final class ClipboardService: ObservableObject {
             IconCache.shared.prime(bundleID: bundleID, runningIcon: icon)
         }
         let iconData: Data? = {
-            guard let bundleID, !bundleID.isEmpty else { return nil }
-            return IconCache.shared.appIconPNGData(bundleID: bundleID)
+            if let bundleID, !bundleID.isEmpty,
+               let data = IconCache.shared.appIconPNGData(bundleID: bundleID) {
+                return data
+            }
+            // Frontmost-app monitoring supplies the NSRunningApplication icon
+            // even when a bundle identifier is unavailable (Finder aliases,
+            // helper processes, older apps). Persist that concrete image.
+            return sourceApp.icon.flatMap { IconCache.shared.appIconPNGData(image: $0) }
         }()
         if !snapshot.fileURLs.isEmpty {
             return snapshot.fileURLs.compactMap { fileURL in
-                var item = captureFile(at: fileURL, appName: appName, bundleID: bundleID)
+                guard var item = captureFile(at: fileURL, appName: appName, bundleID: bundleID) else { return nil }
                 item.appIconData = iconData
                 return item
             }
@@ -219,7 +228,17 @@ final class ClipboardService: ObservableObject {
         }
         return result.isEmpty ? nil : result
     }
-    private func captureFile(at url: URL, appName: String, bundleID: String?) -> ClipboardItem {
+    private func captureFile(at inputURL: URL, appName: String, bundleID: String?) -> ClipboardItem? {
+        let resolvedURL = (try? URL(resolvingAliasFileAt: inputURL, options: [])) ?? inputURL
+        let resourceValues = try? resolvedURL.resourceValues(forKeys: [.isDirectoryKey])
+        let isDirectory = resourceValues?.isDirectory == true
+        let url: URL
+        if isDirectory {
+            guard let archive = createPortableFolderArchive(from: resolvedURL) else { return nil }
+            url = archive
+        } else {
+            url = resolvedURL
+        }
         // A file URL copied from Finder can carry a security-scoped grant when
         // the app is sandboxed. Hold that scope for the exact read/bookmark
         // operation, then persist the bookmark for later user actions.
@@ -232,16 +251,22 @@ final class ClipboardService: ObservableObject {
         let utType = values?.contentType ?? UTType(filenameExtension: ext)
         let mime = utType?.preferredMIMEType ?? "application/octet-stream"
         let type = classifyFileType(utType: utType, extension: ext, codeExtensions: Self.codeFileExtensions)
-        let data = try? Data(contentsOf: url)
+        // Do not create a deceptively usable cloud card if the source cannot
+        // be read. A security bookmark remains for local Finder actions, but
+        // cross-device transfer requires real bytes.
+        guard let size = values?.fileSize.map({ Int64($0) }) ?? (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) else { return nil }
+        let data = size <= 48 * 1024 * 1024 ? try? Data(contentsOf: url) : nil
+        guard size > 48 * 1024 * 1024 || data != nil else { return nil }
+        let displayName = isDirectory ? "\(resolvedURL.lastPathComponent).zip" : url.lastPathComponent
         let item = ClipboardItem(
             contentType: type,
-            contentText: url.lastPathComponent,
+            contentText: displayName,
             sourceAppName: appName,
             sourceAppBundleID: bundleID,
             syncStatus: .pending,
-            fileName: url.lastPathComponent,
-            fileSize: values?.fileSize.map { Int64($0) } ?? data.map { Int64($0.count) },
-            mimeType: mime,
+            fileName: displayName,
+            fileSize: size,
+            mimeType: isDirectory ? "application/zip" : mime,
             originalFileURL: url,
             localData: data
         )
@@ -249,6 +274,28 @@ final class ClipboardService: ObservableObject {
         let icon = IconCache.shared.fileIcon(for: url)
         IconCache.shared.saveFileIcon(icon, forItemId: item.id)
         return item
+    }
+
+    /// Folders are not a single portable pasteboard representation. Archive
+    /// them once at capture time so every device receives the same complete,
+    /// self-contained file instead of an unusable local directory reference.
+    private func createPortableFolderArchive(from directory: URL) -> URL? {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Sniphet-Folder-Archives", isDirectory: true)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let archive = root.appendingPathComponent("\(UUID().uuidString)-\(directory.lastPathComponent)").appendingPathExtension("zip")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent", directory.path, archive.path]
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  FileManager.default.fileExists(atPath: archive.path) else { return nil }
+            return archive
+        } catch {
+            return nil
+        }
     }
     private func captureRichTextFromSnapshot(
         _ snapshot: PasteboardSnapshot,
@@ -270,14 +317,25 @@ final class ClipboardService: ObservableObject {
             )
             guard let attributed, isMeaningfullyRichText(attributed, plainText: plainText) else { continue }
             let cleanedText = stripLeadingBrowserChrome(from: attributed.string)
+            let fullRange = NSRange(location: 0, length: attributed.length)
+            // RTF is the portable editing baseline. Browsers often provide
+            // only HTML; canonicalising it here on macOS means iOS never has
+            // to invoke Foundation's crash-prone HTML importer just to retain
+            // underline, font, colour or paragraph attributes.
+            let canonicalRTF = snapshot.rtfData
+                ?? (format.type == .rtf ? data : nil)
+                ?? (try? attributed.data(from: fullRange, documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]))
+            let canonicalHTML = snapshot.htmlData
+                ?? (format.type == .html ? data : nil)
+                ?? (try? attributed.data(from: fullRange, documentAttributes: [.documentType: NSAttributedString.DocumentType.html]))
             return ClipboardItem(
                 contentType: .richText,
                 contentText: cleanedText,
                 sourceAppName: appName,
                 sourceAppBundleID: bundleID,
                 syncStatus: .pending,
-                rtfData:  snapshot.rtfData ?? (format.type == .rtf ? data : nil),
-                htmlData: snapshot.htmlData ?? (format.type == .html ? data : nil),
+                rtfData: canonicalRTF,
+                htmlData: canonicalHTML,
                 rtfdData: snapshot.rtfdData ?? (format.type == .rtfd ? data : nil)
             )
         }

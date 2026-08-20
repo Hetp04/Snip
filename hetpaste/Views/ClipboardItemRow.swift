@@ -632,7 +632,7 @@ struct ClipboardItemRow: View {
     @ViewBuilder
     private var pasteTextPreview: some View {
         Group {
-            if item.contentType == .richText || isCodeContent || item.rtfData != nil || item.rtfdData != nil {
+            if item.contentType == .richText || isCodeContent || item.rtfData != nil || item.htmlData != nil || item.rtfdData != nil {
                 RichTextCodeView(
                     item: item,
                     lineLimit: isExpanded ? nil : 5,
@@ -928,7 +928,7 @@ struct ClipboardItemRow: View {
             }
         } else {
             Group {
-                if item.contentType == .richText || isCodeContent || item.rtfData != nil || item.rtfdData != nil {
+                if item.contentType == .richText || isCodeContent || item.rtfData != nil || item.htmlData != nil || item.rtfdData != nil {
                     VStack(alignment: .leading, spacing: 0) {
                         RichTextCodeView(item: item, lineLimit: isExpanded ? nil : 6)
                             .multilineTextAlignment(.leading)

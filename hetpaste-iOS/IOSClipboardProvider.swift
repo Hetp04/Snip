@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 import UIKit
 
 /// Shared pasteboard interface for iOS conforming to `ClipboardProviding`.
@@ -14,17 +15,23 @@ public final class IOSClipboardProvider: ClipboardProviding {
         generateHaptic()
     }
 
-    public func copyRichText(plainText: String?, rtfData: Data?, htmlData: Data?) {
+    public func copyRichText(plainText: String?, rtfData: Data?, htmlData: Data?, rtfdData: Data? = nil) {
         var items: [String: Any] = [:]
         if let plainText {
-            items["public.utf8-plain-text"] = plainText
-            items["public.plain-text"] = plainText
+            items[UTType.utf8PlainText.identifier] = plainText
+            items[UTType.plainText.identifier] = plainText
         }
         if let rtfData {
-            items["public.rtf"] = rtfData
+            items[UTType.rtf.identifier] = rtfData
         }
         if let htmlData {
-            items["public.html"] = htmlData
+            items[UTType.html.identifier] = htmlData
+        }
+        // RTFD is the only portable representation that can retain AppKit
+        // attachments. UIKit does not expose a convenience constant, but the
+        // registered UTI is understood by Apple pasteboards.
+        if let rtfdData {
+            items["com.apple.rtfd"] = rtfdData
         }
         if !items.isEmpty {
             pasteboard.setItems([items])
@@ -45,6 +52,28 @@ public final class IOSClipboardProvider: ClipboardProviding {
 
     public func copyURL(_ url: URL) {
         pasteboard.url = url
+        generateHaptic()
+    }
+
+    @discardableResult
+    public func copyColor(_ value: String?) -> Bool {
+        guard let color = PortableClipboardColor.parse(value) else { return false }
+        // `color` is UIKit's standard cross-app representation. Keep the
+        // source notation as a text fallback for apps that do not accept it.
+        let uiColor = UIColor(red: color.red, green: color.green, blue: color.blue, alpha: color.alpha)
+        // UniformTypeIdentifiers does not currently expose a Swift constant
+        // for this long-standing Apple pasteboard type.
+        var representations: [String: Any] = ["public.color": uiColor]
+        if let value { representations[UTType.utf8PlainText.identifier] = value }
+        pasteboard.setItems([representations])
+        generateHaptic()
+        return true
+    }
+
+    public func copyFileData(_ data: Data, fileName: String? = nil) {
+        let fileExtension = fileName.map { URL(fileURLWithPath: $0).pathExtension } ?? ""
+        let typeIdentifier = UTType(filenameExtension: fileExtension)?.identifier ?? UTType.data.identifier
+        pasteboard.setData(data, forPasteboardType: typeIdentifier)
         generateHaptic()
     }
 

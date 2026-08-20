@@ -66,6 +66,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
     private var automaticSyncTask: Task<Void, Never>?
     private var coalescedSyncTask: Task<Void, Never>?
     private var followUpRemoteSyncRequested = false
+    private var hasCompletedInitialCloudLoad = false
     private var clipboardCaptureStateCancellable: AnyCancellable?
 
     private let retryNotBeforeKey = "cloudkit.retry-not-before"
@@ -203,6 +204,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
         LibraryMetadataStore.shared.remove(items: ids)
         for id in ids {
             AssetCache.shared.remove(for: id)
+            AssetCache.shared.removeRichPayload(for: id)
             FileAccessStore.shared.remove(for: id)
         }
         reloadVisibleLibraryPage()
@@ -251,16 +253,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
             // CloudKit returns only records since the persisted zone token.
             // On a new device it streams the initial zone in server batches;
             // on every later launch it normally writes only a small delta.
-            _ = try await CloudKitManager.shared.consumeRemoteChanges(
-                onRecordsChanged: { LibraryMetadataStore.shared.applyRemoteRecords($0) },
-                onRecordsDeleted: { LibraryMetadataStore.shared.applyRemoteDeletions($0) },
-                onPageApplied: { [weak self] in
-                    // First-run imports can span months of data. Publish the
-                    // newest local page after every CloudKit batch instead of
-                    // making the user wait for the historical import to end.
-                    Task { @MainActor [weak self] in self?.reloadVisibleLibraryPage() }
-                }
-            )
+            let delta = try await LibrarySyncCoordinator.shared.sync()
             refreshPendingQueuesFromStore()
             reloadVisibleLibraryPage()
             startEmbeddingBackfill()
@@ -269,7 +262,8 @@ final class ClipboardHistoryViewModel: ObservableObject {
             // Resumable transfers retain their local source after a crash.
             // Only states whose source is gone are safe to reclaim here.
             await repository.cleanupAbandonedChunkTransfers()
-            CloudSyncDiagnostics.shared.recordSuccess()
+            CloudSyncDiagnostics.shared.recordSuccess(source: "macOS foreground delta", delta: delta)
+            hasCompletedInitialCloudLoad = true
             if pendingItemIDs.isEmpty,
                pendingFolderIDs.isEmpty,
                pendingDeletionIDs.isEmpty,
@@ -354,12 +348,30 @@ final class ClipboardHistoryViewModel: ObservableObject {
         }
         coalescedSyncTask = Task { [weak self] in
             guard let self else { return }
-            await self.loadHistory()
+            if self.hasCompletedInitialCloudLoad { await self.syncRemoteDeltaOnly() }
+            else { await self.loadHistory() }
             self.coalescedSyncTask = nil
             if self.followUpRemoteSyncRequested {
                 self.followUpRemoteSyncRequested = false
                 self.handleRemoteCloudChange()
             }
+        }
+    }
+    /// The periodic fallback must be cheap when there is nothing new. It only
+    /// advances the zone token and reloads visible UI when CloudKit reports a
+    /// real record change; bootstrap, embeddings, and transfer cleanup remain
+    /// in the full initial-load path.
+    private func syncRemoteDeltaOnly() async {
+        do {
+            let delta = try await LibrarySyncCoordinator.shared.sync()
+            if delta.hasChanges {
+                let applyStartedAt = Date()
+                reloadVisibleLibraryPage(); persistLibraryCache()
+                CloudSyncDiagnostics.shared.recordUIApply(duration: Date().timeIntervalSince(applyStartedAt))
+            }
+            CloudSyncDiagnostics.shared.recordSuccess(source: "macOS fallback delta", delta: delta)
+        } catch {
+            CloudSyncDiagnostics.shared.recordFailure(error)
         }
     }
     
@@ -533,6 +545,9 @@ final class ClipboardHistoryViewModel: ObservableObject {
             pendingItemIDs.remove(item.id)
             persistLibraryCache()
             return true
+        } catch let conflict as ClipboardContentConflictError {
+            preserveContentConflict(conflict)
+            return false
         } catch {
             updateItem(id: item.id, touchModifiedAt: false) { $0.syncStatus = .failed }
             pendingItemIDs.insert(item.id)
@@ -541,6 +556,29 @@ final class ClipboardHistoryViewModel: ObservableObject {
             handleCloudFailure(error)
             print("❌ Clipboard iCloud save error: \(error.localizedDescription)")
             return false
+        }
+    }
+
+    private func preserveContentConflict(_ conflict: ClipboardContentConflictError) {
+        var localCopy = conflict.local
+        localCopy.id = UUID()
+        localCopy.createdAt = Date()
+        localCopy.updatedAt = localCopy.createdAt
+        localCopy.sourceAppName = "\(localCopy.sourceAppName) — Conflict Copy"
+        localCopy.syncStatus = .pending
+
+        if let index = items.firstIndex(where: { $0.id == conflict.server.id }) {
+            items[index] = conflict.server
+        }
+        LibraryMetadataStore.shared.upsert(items: [conflict.server])
+        items.append(localCopy)
+        pendingItemIDs.remove(conflict.server.id)
+        pendingItemIDs.insert(localCopy.id)
+        persistLibraryCache(immediately: true)
+        loadError = "Another device edited this card first. Your edit was preserved as a Conflict Copy."
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(350))
+            await self?.retryQueuedChanges()
         }
     }
 
@@ -946,7 +984,8 @@ final class ClipboardHistoryViewModel: ObservableObject {
     }
     func loadLocalDataIfNeeded(for item: ClipboardItem) {
         guard item.localData == nil, item.storagePath != nil else { return }
-        if let manifest = CloudChunkManifest(storagePath: item.storagePath), manifest.kind == .richPayload {
+        if (CloudChunkManifest(storagePath: item.storagePath)?.kind == .richPayload)
+            || item.storagePath?.hasPrefix(CloudClipboardPayload.storagePrefix) == true {
             guard !assetLoadingIDs.contains(item.id) else { return }
             assetLoadingIDs.insert(item.id)
             assetLoadErrors[item.id] = nil
@@ -1254,9 +1293,10 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 ? ClipboardRestoreResult(didCopy: true, message: "Copied as plain text")
                 : ClipboardRestoreResult(didCopy: false, message: "Could not copy item")
         }
-        if item.contentType == .richText {
+        if item.hasPortableRichText {
             var richItem = item
-            if let manifest = CloudChunkManifest(storagePath: item.storagePath), manifest.kind == .richPayload {
+            if (CloudChunkManifest(storagePath: item.storagePath)?.kind == .richPayload)
+                || item.storagePath?.hasPrefix(CloudClipboardPayload.storagePrefix) == true {
                 do {
                     guard let hydrated = try await repository.hydrateRichPayload(for: item) else {
                         return ClipboardRestoreResult(didCopy: false, message: "Could not restore rich text")
@@ -1276,6 +1316,15 @@ final class ClipboardHistoryViewModel: ObservableObject {
             return writeRichText(richItem, to: pasteboard)
                 ? ClipboardRestoreResult(didCopy: true, message: "Copied to clipboard")
                 : ClipboardRestoreResult(didCopy: false, message: "Could not copy rich text")
+        }
+        if item.contentType == .text,
+           let portableColor = PortableClipboardColor.parse(item.contentText) {
+            pasteboard.clearContents()
+            let color = NSColor(calibratedRed: portableColor.red, green: portableColor.green, blue: portableColor.blue, alpha: portableColor.alpha)
+            let didWrite = pasteboard.writeObjects([color])
+            if didWrite, let text = item.contentText { pasteboard.setString(text, forType: .string) }
+            service.markSelfCopy()
+            return ClipboardRestoreResult(didCopy: didWrite, message: didWrite ? "Copied to clipboard" : "Could not copy color")
         }
         if let url = item.revealableFileURL,
            item.contentType == .file || item.contentType == .video || item.contentType == .image {
@@ -1328,6 +1377,22 @@ final class ClipboardHistoryViewModel: ObservableObject {
            item.contentType == .file || item.contentType == .video || item.contentType == .image {
             return NSItemProvider(object: url as NSURL)
         }
+        // The actual portable representations, not the capture label, decide
+        // whether an external drag retains formatting. Some legacy captures
+        // are labelled text while still carrying valid RTF/HTML/RTFD.
+        if item.hasPortableRichText {
+            let provider = NSItemProvider(object: (item.contentText ?? "") as NSString)
+            if let data = item.rtfdData {
+                provider.registerDataRepresentation(forTypeIdentifier: UTType.rtfd.identifier, visibility: .all) { completion in completion(data, nil); return nil }
+            }
+            if let data = item.rtfData {
+                provider.registerDataRepresentation(forTypeIdentifier: UTType.rtf.identifier, visibility: .all) { completion in completion(data, nil); return nil }
+            }
+            if let data = item.htmlData {
+                provider.registerDataRepresentation(forTypeIdentifier: UTType.html.identifier, visibility: .all) { completion in completion(data, nil); return nil }
+            }
+            return provider
+        }
         switch item.contentType {
         case .file, .video:
             break
@@ -1340,31 +1405,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
                 return NSItemProvider(object: text as NSString)
             }
         case .richText:
-            // Start with the standard text object. Mail accepts this concrete
-            // AppKit representation reliably; richer forms are additional.
-            let provider = NSItemProvider(object: (item.contentText ?? "") as NSString)
-            if let data = item.rtfdData {
-                provider.registerDataRepresentation(forTypeIdentifier: UTType.rtfd.identifier, visibility: .all) { completion in
-                    completion(data, nil)
-                    return nil
-                }
-                return provider
-            }
-            if let data = item.rtfData {
-                provider.registerDataRepresentation(forTypeIdentifier: UTType.rtf.identifier, visibility: .all) { completion in
-                    completion(data, nil)
-                    return nil
-                }
-                return provider
-            }
-            if let data = item.htmlData {
-                provider.registerDataRepresentation(forTypeIdentifier: UTType.html.identifier, visibility: .all) { completion in
-                    completion(data, nil)
-                    return nil
-                }
-                return provider
-            }
-            return provider
+            return NSItemProvider(object: (item.contentText ?? "") as NSString)
         case .image:
             if let data = item.localData {
                 let provider = NSItemProvider()
@@ -1550,6 +1591,12 @@ final class ClipboardHistoryViewModel: ObservableObject {
             $0.rtfData = rtfData
             $0.htmlData = htmlData
             $0.rtfdData = rtfdData
+            // An edit that contains a portable rich representation is no
+            // longer plain text. This keeps every platform on the exact
+            // formatting path instead of a code/plain-text renderer.
+            if $0.hasPortableRichText {
+                $0.contentType = .richText
+            }
             $0.updatedAt = Date()
         }
         

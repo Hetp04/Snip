@@ -97,19 +97,19 @@
 			);
 			target = 338A909430364FC2005CBCDE /* hetpaste-iOS */;
 		};
-		A1B2C3D4E5F60708090A0B0C /* Exceptions for "hetpaste-iOS" folder in "hetpaste-iOS" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = 338A909430364FC2005CBCDE /* hetpaste-iOS */;
-		};
 		3392DA1A2FD1076000F66EDF /* Exceptions for "hetpaste" folder in "hetpaste" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
 			);
 			target = 33AECBFF2FD0CA50007AA64D /* hetpaste */;
+		};
+		A1B2C3D4E5F60708090A0B0C /* Exceptions for "hetpaste-iOS" folder in "hetpaste-iOS" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 338A909430364FC2005CBCDE /* hetpaste-iOS */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 

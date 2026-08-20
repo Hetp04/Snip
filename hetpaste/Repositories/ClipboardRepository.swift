@@ -1,4 +1,5 @@
 import CloudKit
+import CryptoKit
 import Foundation
 
 struct SemanticSearchHit: Sendable { let id: UUID; let similarity: Double }
@@ -8,12 +9,21 @@ struct ClipboardHistoryDeletionFailure: Error {
     let underlyingError: Error
 }
 
+/// CloudKit retained a different content revision for the same card. Callers
+/// must never mark the local revision synced in this case: they either present
+/// resolution UI or preserve the local revision as a separate conflict card.
+struct ClipboardContentConflictError: Error {
+    let local: ClipboardItem
+    let server: ClipboardItem
+}
+
 final class ClipboardRepository {
     private let cloud = CloudKitManager.shared
     /// Deliberately below CloudKit's per-record asset ceiling. Large captures
     /// are represented by a tiny manifest on the parent record plus these
     /// independent assets, so capture itself has no product-imposed size cap.
     private static let chunkSize = 16 * 1024 * 1024
+    private static let concurrentChunkUploads = 3
 
     func fetchAll() async throws -> [ClipboardItem] {
         try await cloud.verifyAccount()
@@ -39,19 +49,33 @@ final class ClipboardRepository {
         var uploadedChunkCount = 0
         var savedRecord: CKRecord?
         let payload = try CloudClipboardPayload.encodedIfRequired(for: item)
+        let payloadChecksum = payload == nil ? nil : CloudClipboardPayload.checksum(for: item)
 
         do {
-            if let payload {
+            if payload != nil, existing?.string("richPayloadChecksum") == payloadChecksum,
+               let previousPath = existing?.string("storagePath"),
+               previousPath.hasPrefix(CloudClipboardPayload.storagePrefix) || CloudChunkManifest(storagePath: previousPath)?.kind == .richPayload {
+                // A pin/folder/metadata mutation must not re-upload the same
+                // large rich-text body. Retain the existing asset/chunks by
+                // checksum and only save the changed metadata.
+                record["contentText"] = item.contentText?.cloudKitInlineValue(maximumUTF8Bytes: 512 * 1024)
+                record["rtfData"] = nil; record["htmlData"] = nil; record["rtfdData"] = nil
+                record["storagePath"] = previousPath
+                synced.storagePath = previousPath
+            } else if let payload {
                 if payload.count <= Self.chunkSize * 3 {
                     newManifest = nil
                     let pair = try cloud.asset(from: payload, id: item.id)
                     record["asset"] = pair.0
-                    record["contentText"] = nil
+                    // Keep a small preview queryable and renderable without
+                    // eagerly downloading the full rich payload on every sync.
+                    record["contentText"] = item.contentText?.cloudKitInlineValue(maximumUTF8Bytes: 512 * 1024)
                     record["rtfData"] = nil
                     record["htmlData"] = nil
                     record["rtfdData"] = nil
                     synced.storagePath = "\(CloudClipboardPayload.storagePrefix)\(item.id.uuidString)"
                     record["storagePath"] = synced.storagePath
+                    record["richPayloadChecksum"] = payloadChecksum
                     temp = pair.1
                 } else {
                     let manifest = try await uploadChunks(payload, parentID: item.id, kind: .richPayload)
@@ -67,7 +91,15 @@ final class ClipboardRepository {
                     record["rtfdData"] = nil
                     synced.storagePath = manifest.storagePath
                     record["storagePath"] = manifest.storagePath
+                    record["richPayloadChecksum"] = payloadChecksum
                 }
+            } else if item.localData == nil,
+                      let previousPath = existing?.string("storagePath"), !previousPath.isEmpty {
+                // A metadata-only mutation of a streamed file must retain its
+                // committed asset/chunk manifest. Re-uploading a multi-GB
+                // source for a pin or folder edit is both slow and unsafe.
+                record["storagePath"] = previousPath
+                synced.storagePath = previousPath
             } else if let data = item.localData {
                 if data.count <= Self.chunkSize * 3 {
                     newManifest = nil
@@ -84,6 +116,16 @@ final class ClipboardRepository {
                     synced.storagePath = manifest.storagePath
                     record["storagePath"] = manifest.storagePath
                 }
+            } else if let sourceURL = item.revealableFileURL ?? item.originalFileURL {
+                // Large Finder captures retain a bookmark instead of loading
+                // gigabytes into memory. Stream them into the existing chunk
+                // protocol so upload remains bounded and resumable.
+                let manifest = try await uploadChunks(from: sourceURL, parentID: item.id, kind: .binary)
+                uploadedChunkCount = manifest.count
+                newManifest = manifest
+                record["asset"] = nil
+                synced.storagePath = manifest.storagePath
+                record["storagePath"] = manifest.storagePath
             }
             defer { if let temp { try? FileManager.default.removeItem(at: temp) } }
             savedRecord = try await cloud.save(record)
@@ -116,7 +158,14 @@ final class ClipboardRepository {
         let didCommitLocal = savedRecord?.date("updatedAt") == record.date("updatedAt")
             && savedRecord?.string("storagePath") == record.string("storagePath")
         if didCommitLocal { return synced }
-        return (try? savedRecord.map(ClipboardItem.init(cloudRecord:))) ?? synced
+        guard let server = try? savedRecord.map(ClipboardItem.init(cloudRecord:)) else { return synced }
+        let localChecksum = item.hasPortableRichText ? CloudClipboardPayload.checksum(for: item) : nil
+        let serverChecksum = server.richPayloadChecksum
+            ?? (server.hasPortableRichText ? CloudClipboardPayload.checksum(for: server) : nil)
+        if localChecksum != serverChecksum || item.contentText != server.contentText || item.contentType != server.contentType {
+            throw ClipboardContentConflictError(local: item, server: server)
+        }
+        return server
     }
     func updateEmbeddings(id: UUID, rawVector: [Double]?, memoryVector: [Double]?, status: String) async throws { try await mutate(id) { $0["rawEmbedding"] = rawVector.map(CloudKitVectorCodec.encode); $0["embedding"] = memoryVector.map(CloudKitVectorCodec.encode); $0["embeddingStatus"] = status } }
     func updateEmbeddingStatus(id: UUID, status: String) async throws { try await mutate(id) { $0["embeddingStatus"] = status } }
@@ -131,14 +180,14 @@ final class ClipboardRepository {
     }
     func updateSearchContext(id: UUID, context: String, sourceHash: String) async throws { try await mutate(id) { $0["searchContext"] = context; $0["contextSourceHash"] = sourceHash } }
     func cachedSearchContext(sourceHash: String) async throws -> String? {
-        // Keep this lookup local. It avoids a schema/index dependency during a
-        // new container's first save and is fast for the bounded library UI.
-        return try await fetchAll().first { $0.contextSourceHash == sourceHash }?.searchContext
+        LibraryMetadataStore.shared.cachedSearchContext(sourceHash: sourceHash)
     }
-    func fetchItemsNeedingEmbeddings() async throws -> [ClipboardItem] { try await fetchAll().filter { $0.embeddingStatus == "pending" } }
+    func fetchItemsNeedingEmbeddings() async throws -> [ClipboardItem] {
+        LibraryMetadataStore.shared.allActiveItems().filter { $0.embeddingStatus == "pending" }
+    }
     func hybridSearch(vector: [Double], rawQuery: String, limit: Int = 40) async throws -> [SemanticSearchHit] {
         let terms = rawQuery.lowercased().split(whereSeparator: \Character.isWhitespace).map(String.init)
-        return try await fetchAll().compactMap { item in
+        return LibraryMetadataStore.shared.allActiveItems().compactMap { item in
             guard let stored = item.embedding ?? item.rawEmbedding else { return nil }
             let text = item.rawSearchableText.lowercased(), boost = terms.isEmpty ? 0 : Double(terms.filter(text.contains).count) / Double(terms.count) * 0.15
             return SemanticSearchHit(id: item.id, similarity: min(1, cosine(vector, stored) + boost))
@@ -146,11 +195,19 @@ final class ClipboardRepository {
     }
     func setFavorite(id: UUID, isFavorite: Bool) async throws { try await mutate(id) { $0["isPinned"] = isFavorite as NSNumber } }
     func setDeleted(id: UUID, isDeleted: Bool, deletedAt: Date?) async throws { try await mutate(id) { $0["isDeleted"] = isDeleted as NSNumber; $0["deletedAt"] = deletedAt } }
-    func addToFolder(ids: [UUID], folderID: UUID) async throws { for id in Set(ids) { try await mutate(id) { record in var values = record.uuids("folderIDs"); values.insert(folderID); record["folderIDs"] = values.map(\.uuidString) } } }
-    func removeFromFolder(id: UUID, folderID: UUID) async throws { try await mutate(id) { var values = $0.uuids("folderIDs"); values.remove(folderID); $0["folderIDs"] = values.isEmpty ? nil : values.map(\.uuidString) } }
+    func addToFolder(ids: [UUID], folderID: UUID) async throws {
+        let operations = Set(ids).map { FolderMembershipOperation(id: UUID(), itemID: $0, folderID: folderID, kind: .add, createdAt: Date()).cloudRecord() }
+        try await cloud.save(records: operations)
+        for id in Set(ids) { try await mutate(id) { record in var values = record.uuids("folderIDs"); values.insert(folderID); record["folderIDs"] = values.map(\.uuidString) } }
+    }
+    func removeFromFolder(id: UUID, folderID: UUID) async throws {
+        try await cloud.save(FolderMembershipOperation(id: UUID(), itemID: id, folderID: folderID, kind: .remove, createdAt: Date()).cloudRecord())
+        try await mutate(id) { var values = $0.uuids("folderIDs"); values.remove(folderID); $0["folderIDs"] = values.isEmpty ? nil : values.map(\.uuidString) }
+    }
     func delete(id: UUID) async throws {
         let manifest = CloudChunkManifest(storagePath: try await cloud.record(type: CloudRecordType.clipboardItem, id: id)?.string("storagePath"))
         try await cloud.delete(type: CloudRecordType.clipboardItem, id: id)
+        AssetCache.shared.removeRichPayload(for: id)
         if let manifest { try? await deleteChunks(parentID: id, manifest: manifest, count: manifest.count) }
     }
     func deleteHistory(
@@ -208,13 +265,31 @@ final class ClipboardRepository {
     }
 
     func hydrateRichPayload(for item: ClipboardItem) async throws -> ClipboardItem? {
-        guard let manifest = CloudChunkManifest(storagePath: item.storagePath), manifest.kind == .richPayload,
-              let payload = CloudClipboardPayload.decode(from: try await downloadChunks(parentID: item.id, manifest: manifest)) else { return nil }
+        let startedAt = Date()
+        let expectedChecksum = item.richPayloadChecksum ?? CloudClipboardPayload.checksum(for: item)
+        let data: Data
+        if let cached = AssetCache.shared.richPayloadData(for: item.id, checksum: expectedChecksum) {
+            data = cached
+        } else if let manifest = CloudChunkManifest(storagePath: item.storagePath), manifest.kind == .richPayload {
+            data = try await downloadChunks(parentID: item.id, manifest: manifest)
+        } else if item.storagePath?.hasPrefix(CloudClipboardPayload.storagePrefix) == true,
+                  let record = try await cloud.record(type: CloudRecordType.clipboardItem, id: item.id),
+                  let url = (record["asset"] as? CKAsset)?.fileURL {
+            data = try Data(contentsOf: url)
+        } else { return nil }
+        guard let payload = CloudClipboardPayload.decode(from: data) else { throw CloudKitPersistenceError.corruptChunkPayload }
+        guard payload.checksum == expectedChecksum || item.richPayloadChecksum == nil else {
+            throw CloudKitPersistenceError.corruptChunkPayload
+        }
+        AssetCache.shared.storeRichPayload(data, for: item.id, checksum: payload.checksum)
+        await MainActor.run { CloudSyncDiagnostics.shared.recordRichPayloadHydration(duration: Date().timeIntervalSince(startedAt)) }
         var hydrated = item
         hydrated.contentText = payload.contentText
         hydrated.rtfData = payload.rtfData
         hydrated.htmlData = payload.htmlData
         hydrated.rtfdData = payload.rtfdData
+        hydrated.richPayloadChecksum = payload.checksum
+        hydrated.richPayloadVersion = payload.version
         return hydrated
     }
 
@@ -241,7 +316,17 @@ final class ClipboardRepository {
     func createFolder(id: UUID, name: String, createdAt: Date = Date(), updatedAt: Date = Date()) async throws { _ = try await cloud.save(ClipboardFolder(id: id, name: name, createdAt: createdAt, updatedAt: updatedAt).cloudRecord()) }
     func renameFolder(id: UUID, name: String) async throws { guard let r = try await cloud.record(type: CloudRecordType.folder, id: id) else { return }; r["name"] = name; r["updatedAt"] = Date(); _ = try await cloud.save(r) }
     func deleteFolder(id: UUID) async throws {
-        let records = try await cloud.fetchAll(type: CloudRecordType.clipboardItem).filter { $0.uuids("folderIDs").contains(id) }
+        // Query only cards that actually contain this folder. Production must
+        // have a queryable `folderIDs` field; this avoids loading the entire
+        // library just to delete one folder.
+        let query = CKQuery(recordType: CloudRecordType.clipboardItem,
+                            predicate: NSPredicate(format: "folderIDs CONTAINS %@", id.uuidString))
+        let records = try await cloud.records(matching: query).compactMap { try? $0.1.get() }
+        let operations = records.compactMap { record -> CKRecord? in
+            guard let itemID = record.string("uuid").flatMap(UUID.init(uuidString:)) else { return nil }
+            return FolderMembershipOperation(id: UUID(), itemID: itemID, folderID: id, kind: .remove, createdAt: Date()).cloudRecord()
+        }
+        try await cloud.save(records: operations)
         for record in records { var ids = record.uuids("folderIDs"); ids.remove(id); record["folderIDs"] = ids.isEmpty ? nil : ids.map(\.uuidString); record["updatedAt"] = Date() }
         try await cloud.save(records: records)
         try await cloud.delete(type: CloudRecordType.folder, id: id)
@@ -286,25 +371,66 @@ final class ClipboardRepository {
         }
         CloudSyncDiagnostics.shared.beginLargeTransfer(totalBytes: manifest.byteCount, completedBytes: completedBytes)
         do {
-            for index in 0..<manifest.count {
-                if state.completedIndexes.contains(index) { continue }
-                let lower = index * Self.chunkSize
-                let upper = min(lower + Self.chunkSize, data.count)
-                let chunk = data.subdata(in: lower..<upper)
+            let pending = (0..<manifest.count).filter { !state.completedIndexes.contains($0) }
+            for start in stride(from: 0, to: pending.count, by: Self.concurrentChunkUploads) {
+                let batch = Array(pending[start..<min(start + Self.concurrentChunkUploads, pending.count)])
+                try await withThrowingTaskGroup(of: (index: Int, bytes: Int).self) { group in
+                    for index in batch {
+                        group.addTask { @MainActor [cloud] in
+                            let lower = index * Self.chunkSize
+                            let upper = min(lower + Self.chunkSize, data.count)
+                            let chunk = data.subdata(in: lower..<upper)
+                            let name = Self.chunkRecordName(parentID: parentID, manifest: manifest, index: index)
+                            let pair = try cloud.asset(from: chunk, name: name)
+                            defer { try? FileManager.default.removeItem(at: pair.1) }
+                            let record = CKRecord(recordType: CloudRecordType.clipboardAssetChunk,
+                                                  recordID: cloud.recordID(type: CloudRecordType.clipboardAssetChunk, recordName: name))
+                            record["parentID"] = parentID.uuidString; record["position"] = index as NSNumber
+                            record["byteCount"] = chunk.count as NSNumber; record["createdAt"] = Date(); record["asset"] = pair.0
+                            _ = try await cloud.save(record)
+                            return (index, chunk.count)
+                        }
+                    }
+                    for try await completed in group {
+                        CloudChunkTransferStore.shared.markCompleted(itemID: parentID, index: completed.index)
+                        CloudSyncDiagnostics.shared.advanceLargeTransfer(by: Int64(completed.bytes))
+                    }
+                }
+            }
+        } catch {
+            CloudSyncDiagnostics.shared.failLargeTransfer()
+            throw error
+        }
+        return manifest
+    }
+
+    private func uploadChunks(from fileURL: URL, parentID: UUID, kind: CloudChunkManifest.Kind) async throws -> CloudChunkManifest {
+        let didStartAccess = fileURL.startAccessingSecurityScopedResource()
+        defer { if didStartAccess { fileURL.stopAccessingSecurityScopedResource() } }
+        let byteCount = try FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber
+        guard let byteCount else { throw CocoaError(.fileReadUnknown) }
+        let checksum = try Self.fileChecksum(fileURL)
+        let count = max(1, Int((byteCount.int64Value + Int64(Self.chunkSize) - 1) / Int64(Self.chunkSize)))
+        let manifest = CloudChunkManifest(kind: kind, count: count, byteCount: byteCount.int64Value, checksum: checksum)
+        await LargeTransferScheduler.shared.acquire()
+        defer { Task { await LargeTransferScheduler.shared.release() } }
+        let state = CloudChunkTransferStore.shared.begin(itemID: parentID, manifest: manifest)
+        CloudSyncDiagnostics.shared.beginLargeTransfer(totalBytes: manifest.byteCount)
+        do {
+            for index in 0..<manifest.count where !state.completedIndexes.contains(index) {
+                let offset = UInt64(index * Self.chunkSize)
+                let expectedCount = min(Self.chunkSize, Int(manifest.byteCount - Int64(offset)))
+                let chunk = try Self.fileChunk(fileURL, offset: offset, count: expectedCount)
                 let name = Self.chunkRecordName(parentID: parentID, manifest: manifest, index: index)
                 let pair = try cloud.asset(from: chunk, name: name)
                 defer { try? FileManager.default.removeItem(at: pair.1) }
                 let record = CKRecord(recordType: CloudRecordType.clipboardAssetChunk,
                                       recordID: cloud.recordID(type: CloudRecordType.clipboardAssetChunk, recordName: name))
-                record["parentID"] = parentID.uuidString
-                record["position"] = index as NSNumber
-                record["byteCount"] = chunk.count as NSNumber
-                record["createdAt"] = Date()
-                record["asset"] = pair.0
+                record["parentID"] = parentID.uuidString; record["position"] = index as NSNumber
+                record["byteCount"] = chunk.count as NSNumber; record["createdAt"] = Date(); record["asset"] = pair.0
                 _ = try await cloud.save(record)
                 CloudChunkTransferStore.shared.markCompleted(itemID: parentID, index: index)
                 CloudSyncDiagnostics.shared.advanceLargeTransfer(by: Int64(chunk.count))
-                // Cooperate with the UI and normal CloudKit work between chunks.
                 await Task.yield()
             }
         } catch {
@@ -312,6 +438,24 @@ final class ClipboardRepository {
             throw error
         }
         return manifest
+    }
+
+    private static func fileChunk(_ url: URL, offset: UInt64, count: Int) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: offset)
+        guard let data = try handle.read(upToCount: count), data.count == count else { throw CocoaError(.fileReadCorruptFile) }
+        return data
+    }
+
+    private static func fileChecksum(_ url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private func downloadChunks(parentID: UUID, manifest: CloudChunkManifest) async throws -> Data {

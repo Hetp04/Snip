@@ -49,8 +49,23 @@ struct RichTextCodeView: View {
                 
                 guard let validNSAttr = nsAttr else { return nil as AttributedString? }
                 
-                if currentItem.contentType == .richText {
-                    // For explicitly authored rich text snippets, retain exact styling
+                let hasPortableRichText = currentItem.rtfData != nil || currentItem.htmlData != nil || currentItem.rtfdData != nil
+                if currentItem.contentType == .richText || hasPortableRichText {
+                    // RTF, HTML and RTFD are portable authored formatting.
+                    // Never run them through the code/plain-text normalizer:
+                    // it is allowed to improve syntax readability but must not
+                    // change underline, strike-through, links, paragraph
+                    // styles, colors, attachments, or other rich attributes.
+                    if currentItem.detectedLanguage != nil {
+                        let presentation = NSMutableAttributedString(attributedString: validNSAttr)
+                        let range = NSRange(location: 0, length: presentation.length)
+                        presentation.removeAttribute(.backgroundColor, range: range)
+                        presentation.enumerateAttribute(.foregroundColor, in: range) { value, subrange, _ in
+                            guard let color = value as? NSColor, Self.isTooLightForLightSurface(color) else { return }
+                            presentation.addAttribute(.foregroundColor, value: NSColor.labelColor, range: subrange)
+                        }
+                        return try? AttributedString(presentation, including: \.appKit)
+                    }
                     return try? AttributedString(validNSAttr, including: \.appKit)
                 }
                 
@@ -81,6 +96,11 @@ struct RichTextCodeView: View {
             
             self.attributedText = newAttr
         }
+    }
+
+    private static func isTooLightForLightSurface(_ color: NSColor) -> Bool {
+        guard let value = color.usingColorSpace(.sRGB) else { return false }
+        return (value.redComponent * 0.2126) + (value.greenComponent * 0.7152) + (value.blueComponent * 0.0722) > 0.82
     }
 
     private static func readableCodeColor(_ color: NSColor, fallback: NSColor) -> NSColor {

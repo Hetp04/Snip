@@ -22,7 +22,8 @@ final class IOSAppDelegate: NSObject, UIApplicationDelegate {
     private func scheduleBackgroundRefresh() {
         let request = BGAppRefreshTaskRequest(identifier: Self.refreshTaskIdentifier)
         request.earliestBeginDate = Date(timeIntervalSinceNow: 30 * 60)
-        try? BGTaskScheduler.shared.submit(request)
+        do { try BGTaskScheduler.shared.submit(request) }
+        catch { CloudSyncDiagnostics.shared.recordBackgroundSchedulingFailure(error) }
     }
 
     private func handleBackgroundRefresh(_ task: BGAppRefreshTask) {

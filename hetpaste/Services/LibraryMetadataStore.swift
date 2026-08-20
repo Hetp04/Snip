@@ -105,6 +105,13 @@ final class LibraryMetadataStore: @unchecked Sendable {
         )
     }
 
+    /// Point lookup used by the durable mutation outbox. It avoids taking a
+    /// stale SwiftUI snapshot when an edit is saved while another edit arrives.
+    func item(id: UUID) -> ClipboardItem? {
+        lock.lock(); defer { lock.unlock() }
+        return fetchLocked(kind: "item", as: ClipboardItem.self).first(where: { $0.id == id })
+    }
+
     func loadItems(olderThan date: Date?, afterID: UUID?, limit: Int) -> [ClipboardItem] {
         lock.lock(); defer { lock.unlock() }
         let queues = loadQueuesLocked()
@@ -135,6 +142,29 @@ final class LibraryMetadataStore: @unchecked Sendable {
             }
         }
         return results
+    }
+
+    /// Fast local-only candidates for embeddings and semantic search. These
+    /// operations must never require downloading the entire CloudKit library.
+    func allActiveItems(limit: Int = 5_000) -> [ClipboardItem] {
+        lock.lock(); defer { lock.unlock() }
+        let queues = loadQueuesLocked()
+        var result: [ClipboardItem] = []
+        withStatement("SELECT payload FROM records WHERE kind = 'item' AND is_deleted = 0 ORDER BY created_at DESC, id DESC LIMIT ?;") { statement in
+            sqlite3_bind_int(statement, 1, Int32(limit))
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+                let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+                if let item = try? decoder.decode(ClipboardItem.self, from: data), !queues.pendingDeletionIDs.contains(item.id) {
+                    result.append(item)
+                }
+            }
+        }
+        return result
+    }
+
+    func cachedSearchContext(sourceHash: String) -> String? {
+        allActiveItems().first { $0.contextSourceHash == sourceHash }?.searchContext
     }
 
     func itemCount(inFolder folderID: UUID) -> Int {
@@ -287,9 +317,21 @@ final class LibraryMetadataStore: @unchecked Sendable {
         case CloudRecordType.chainItem:
             guard let item = try? ChainItem(cloudRecord: record), !queues.pendingChainIDs.contains(item.chainID) else { return }
             upsertLocked(kind: "chainItem", id: item.id, createdAt: Date(timeIntervalSince1970: TimeInterval(item.position)), value: item)
+        case CloudRecordType.folderMembershipOperation:
+            applyFolderMembershipOperationLocked(record)
         default:
             break
         }
+    }
+
+    private func applyFolderMembershipOperationLocked(_ record: CKRecord) {
+        guard let itemID = record.string("itemID").flatMap(UUID.init(uuidString:)),
+              let folderID = record.string("folderID").flatMap(UUID.init(uuidString:)),
+              let kind = FolderMembershipOperation.Kind(rawValue: record.string("kind") ?? "")
+        else { return }
+        guard var item = fetchLocked(kind: "item", as: ClipboardItem.self).first(where: { $0.id == itemID }) else { return }
+        switch kind { case .add: item.folderIDs.insert(folderID); case .remove: item.folderIDs.remove(folderID) }
+        upsertItemLocked(item)
     }
 
     func applyRemoteDeletion(_ recordID: CKRecord.ID) {
@@ -536,7 +578,10 @@ private extension ClipboardItem {
     var withoutLocalPayload: ClipboardItem {
         var value = self
         value.localData = nil
-        value.rawPasteboardData = nil
+        // Raw representations are opt-in at capture time and are required to
+        // reproduce an item exactly on this Mac after relaunch. They remain
+        // local-only: arbitrary application UTIs are not a safe CloudKit
+        // interchange format and must never be mistaken for portable data.
         value.originalFileURL = nil
         return value
     }

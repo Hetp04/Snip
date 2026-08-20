@@ -52,6 +52,33 @@ final class AssetCache {
     }
     private func url(for id: UUID) -> URL { directory.appendingPathComponent(id.uuidString.lowercased()).appendingPathExtension("asset") }
 
+    // Rich payloads are separate from binary clipboard assets. Keeping the
+    // encoded CloudKit payload on disk means a large formatted item only has
+    // to be downloaded once per device, then remains available for copy and
+    // detail views while offline.
+    func richPayloadData(for id: UUID, checksum: String) -> Data? {
+        let payloadURL = richPayloadURL(for: id, checksum: checksum)
+        guard let data = try? Data(contentsOf: payloadURL) else { return nil }
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: payloadURL.path)
+        return data
+    }
+
+    func storeRichPayload(_ data: Data, for id: UUID, checksum: String) {
+        try? data.write(to: richPayloadURL(for: id, checksum: checksum), options: [.atomic, .completeFileProtection])
+        trimIfNeeded()
+    }
+
+    func removeRichPayload(for id: UUID) {
+        let prefix = id.uuidString.lowercased() + ".richpayload"
+        for url in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [] where url.lastPathComponent.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private func richPayloadURL(for id: UUID, checksum: String) -> URL {
+        directory.appendingPathComponent("\(id.uuidString.lowercased()).richpayload.\(checksum)")
+    }
+
     private func trimIfNeeded() {
         let protectedIDs = protectedIDStrings()
         let values: [(URL, Int64, Date)] = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]))?.compactMap { url in
